@@ -421,11 +421,16 @@ jobs:
               return Buffer.from(sig.data).toString('utf8');
             };
 
+            // URLs are built DETERMINISTICALLY from the tag path, not from
+            // asset.browser_download_url: on a draft release that URL contains
+            // an `untagged-<hash>` path that 404s publicly and BREAKS after
+            // the draft is published under its real tag.
+            const tagBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${version}/`;
             for (const asset of assets) {
               for (const matcher of matchers) {
                 if (!matcher.test(asset.name)) continue;
                 if (matcher.kind === 'url') {
-                  platforms[matcher.key].url = asset.browser_download_url;
+                  platforms[matcher.key].url = tagBase + encodeURIComponent(asset.name);
                 } else {
                   platforms[matcher.key].signature = await fetchSignatureBody(asset.id);
                 }
@@ -457,7 +462,12 @@ jobs:
     runs-on: ubuntu-latest
     if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
     steps:
-      - name: Verify update manifest + asset URLs
+      # Pre-publish verification must go through the API: draft-release assets
+      # are NOT downloadable via their public URLs (404 even authenticated on
+      # the browser path), so plain fetch/HEAD here always fails. URL
+      # correctness is guaranteed by construction (deterministic tag paths);
+      # public reachability is smoke-tested post-publish in publish-release.
+      - name: Verify update manifest + assets (via API)
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
@@ -476,25 +486,24 @@ jobs:
             const manifestAsset = release.assets.find((a) => a.name === manifestName);
             if (!manifestAsset) { core.setFailed(`Missing update manifest asset: ${manifestName}`); return; }
 
-            const res = await fetch(manifestAsset.browser_download_url, { headers: { 'User-Agent': 'release-verify' } });
-            if (!res.ok) { core.setFailed(`Manifest download HTTP ${res.status}`); return; }
-            const manifest = await res.json();
+            const download = await github.rest.repos.getReleaseAsset({
+              owner: context.repo.owner, repo: context.repo.repo,
+              asset_id: manifestAsset.id, headers: { accept: 'application/octet-stream' },
+            });
+            const manifest = JSON.parse(Buffer.from(download.data).toString('utf8'));
 
             const expectedSemver = expectedVersion.replace(/^v/, '');
             if (manifest.version !== expectedSemver) {
               core.setFailed(`Manifest version ${manifest.version} != expected ${expectedSemver}`); return;
             }
 
+            const assetNames = new Set(release.assets.map((a) => a.name));
             const errors = [];
             for (const [platform, entry] of Object.entries(manifest.platforms ?? {})) {
               if (!entry.signature) { errors.push(`${platform}: missing signature`); continue; }
               if (!entry.url) { errors.push(`${platform}: missing url`); continue; }
-              try {
-                const head = await fetch(entry.url, { method: 'HEAD', headers: { 'User-Agent': 'release-verify' } });
-                if (!head.ok) errors.push(`${platform}: url HTTP ${head.status}`);
-              } catch (err) {
-                errors.push(`${platform}: HEAD failed: ${err instanceof Error ? err.message : String(err)}`);
-              }
+              const basename = decodeURIComponent(entry.url.split('/').pop());
+              if (!assetNames.has(basename)) errors.push(`${platform}: url points at missing asset ${basename}`);
             }
             if (errors.length) { core.setFailed(`Manifest verification failed:\n  - ${errors.join('\n  - ')}`); return; }
             core.info(`Verified ${Object.keys(manifest.platforms).length} platforms in ${manifestName}.`);
@@ -514,6 +523,34 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               release_id: Number(process.env.RELEASE_ID), draft: false,
             })
+
+      # Post-publish smoke test: now that the release is public, the manifest
+      # and every platform URL must resolve for an UNAUTHENTICATED client —
+      # exactly what end users' updaters are. NOTE: this can only pass on a
+      # PUBLIC repo; private-repo release assets 404 anonymously, which also
+      # means auto-update can never work from a private repo (host binaries in
+      # a public releases repo instead — see GOTCHAS.md).
+      - name: Smoke-test public URLs
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          MANIFEST_NAME=$([ "$CHANNEL" = "stable" ] && echo latest.json || echo "latest-${CHANNEL}.json")
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${MANIFEST_NAME}"
+          for attempt in 1 2 3; do
+            CODE=$(curl -s -o /tmp/manifest.json -w '%{http_code}' -L -A release-verify "$URL") && [ "$CODE" = "200" ] && break
+            sleep 10
+          done
+          [ "$CODE" = "200" ] || { echo "::error::Manifest not publicly reachable: HTTP $CODE $URL"; exit 1; }
+          FAIL=0
+          for u in $(python3 -c "import json;[print(p['url']) for p in json.load(open('/tmp/manifest.json'))['platforms'].values()]"); do
+            C=$(curl -s -o /dev/null -w '%{http_code}' -I -L -A release-verify "$u")
+            echo "HTTP $C  $u"
+            [ "$C" = "200" ] || FAIL=1
+          done
+          [ "$FAIL" = "0" ] || { echo "::error::One or more platform URLs are not publicly reachable"; exit 1; }
 
       # alpha/beta poll a fixed rolling release (latest-<channel>); this step
       # maintains it. Runs after the draft flip so the manifest never points at

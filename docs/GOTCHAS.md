@@ -97,3 +97,21 @@ re-read this first.
 - Change-detection filters in test workflows can classify `build.rs` or
   workflow edits as "not code" and skip the Rust gates — know your filters
   before trusting a green run as a release probe.
+
+## Private repos cannot serve releases (discovered publishing anasa alpha.1)
+
+- **Release assets on a private repo 404 for unauthenticated clients** — both
+  user downloads AND the tauri updater's manifest polls. A "public alpha from
+  a private repo" requires a separate PUBLIC releases repo (e.g.
+  `<app>-releases`) hosting binaries + manifests; the updater endpoints in
+  tauri.conf.json / the channel code must point there. Cross-repo publishing
+  from CI needs a fine-grained PAT (Contents: R/W on the releases repo) — the
+  default GITHUB_TOKEN cannot write other repos.
+- **`browser_download_url` on a DRAFT release is a trap**: it contains an
+  `untagged-<hash>` path that 404s publicly and breaks after publish. Build
+  manifest URLs deterministically as `releases/download/<tag>/<asset-name>`.
+- **Pre-publish verification must use the API** (draft assets are not
+  HTTP-fetchable); do the unauthenticated HEAD smoke test AFTER the draft
+  flips public.
+- **A brand-new releases repo needs an initial commit** before any release can
+  be created ("Repository is empty" — tags need a commit to point at).
