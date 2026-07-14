@@ -1,0 +1,675 @@
+# Reusable Tauri release workflow: 6-platform build matrix, minisign-signed
+# auto-updater artifacts, per-channel rolling update manifests, changelog guard,
+# release verification, and a post-release version-bump PR.
+#
+# Extracted from anasa's release-with-updater.yml after its first release
+# shipped; every non-obvious step below encodes a failure that actually
+# happened. See README.md for the consumer checklist and docs/GOTCHAS.md for
+# the war stories.
+#
+# Conventions this workflow assumes about the calling repo:
+#   - pnpm + a `pnpm run build` invoked by tauri.conf.json's beforeBuildCommand
+#   - Tauri project at <project_path>/src-tauri with per-OS overlay configs
+#     src-tauri/tauri.{macos,windows,linux}.conf.json
+#   - rust-toolchain.toml at the repo root pinning the toolchain AND declaring
+#     components = ["rustfmt", "clippy"] (without this, rustup auto-installs
+#     the pinned toolchain with the runner's minimal profile and the fmt /
+#     clippy gates fail on every platform)
+#   - CHANGELOG.md with a `## [X.Y.Z...]` heading per released tag
+#   - bundle.createUpdaterArtifacts: true and the updater pubkey in
+#     tauri.conf.json; the updater polls:
+#       stable      → releases/latest/download/latest.json
+#       alpha/beta  → releases/download/latest-<channel>/latest.json
+#   - Windows ships NSIS only (WiX/MSI hard-rejects non-numeric semver
+#     pre-release identifiers like `-alpha.1`)
+
+name: Release (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_display_name:
+        description: 'Human name used in release titles, e.g. "Anasa"'
+        required: true
+        type: string
+      project_path:
+        description: 'Path to the Tauri app package (contains src-tauri/), e.g. apps/desktop or .'
+        required: false
+        type: string
+        default: '.'
+      cargo_package:
+        description: 'The [[package]] name in Cargo.lock to bump post-release'
+        required: true
+        type: string
+      tag:
+        description: 'Tag to release (vX.Y.Z[-suffix]); defaults to the pushed tag ref'
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: 'Node.js version for the frontend build'
+        required: false
+        type: string
+        default: '24'
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        description: 'minisign private key for updater artifact signatures (REQUIRED — createUpdaterArtifacts fails without it)'
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        description: 'Password for the updater key; omit for passwordless keys'
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_API_ISSUER:
+        required: false
+      APPLE_API_KEY:
+        required: false
+      APPLE_API_KEY_BASE64:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+
+jobs:
+  # Fail fast: no CHANGELOG entry for the tag → no matrix spin-up.
+  check-changelog:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolved.outputs.VERSION }}
+    env:
+      INPUT_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: resolved
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            VERSION="$INPUT_TAG"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::Version '$VERSION' is not a valid semver tag (expected vX.Y.Z[-suffix])"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "BARE=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CHANGELOG entry exists
+        env:
+          VERSION: ${{ steps.resolved.outputs.VERSION }}
+          BARE: ${{ steps.resolved.outputs.BARE }}
+        run: |
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::warning::CHANGELOG.md not present — skipping changelog guard"
+            exit 0
+          fi
+          if ! grep -E "^#{1,2} +\[?(${VERSION}|${BARE})\]?" CHANGELOG.md >/dev/null; then
+            echo "::error::CHANGELOG.md has no entry for ${VERSION} (or ${BARE}). Add one before tagging."
+            exit 1
+          fi
+          echo "Found CHANGELOG entry for ${VERSION}."
+
+  create-release:
+    needs: check-changelog
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+      version: ${{ needs.check-changelog.outputs.version }}
+      channel: ${{ steps.get_channel.outputs.CHANNEL }}
+    steps:
+      - name: Determine channel
+        id: get_channel
+        env:
+          VERSION: ${{ needs.check-changelog.outputs.version }}
+        run: |
+          if [[ "$VERSION" == *"-alpha"* ]]; then
+            echo "CHANNEL=alpha" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" == *"-beta"* ]]; then
+            echo "CHANNEL=beta" >> $GITHUB_OUTPUT
+          else
+            echo "CHANNEL=stable" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ needs.check-changelog.outputs.version }}
+          CHANNEL: ${{ steps.get_channel.outputs.CHANNEL }}
+          APP_NAME: ${{ inputs.app_display_name }}
+        with:
+          script: |
+            const { VERSION, CHANNEL, APP_NAME } = process.env;
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: VERSION,
+              name: `${APP_NAME} ${VERSION}`,
+              body: 'Take a look at the assets to download and install this version.',
+              draft: true,
+              prerelease: CHANNEL !== 'stable',
+            })
+            return data.id
+
+  build-and-release:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: native runner per arch — cross-compiling trips rustls/ring
+          # on apple-sys crates. `config` (relative to project_path) applies the
+          # per-OS bundle overlay; without --config those overrides are DROPPED.
+          - {
+              platform: macos-15,
+              target: aarch64-apple-darwin,
+              os_name: darwin,
+              arch: aarch64,
+              config: src-tauri/tauri.macos.conf.json,
+            }
+          - {
+              platform: macos-15-intel,
+              target: x86_64-apple-darwin,
+              os_name: darwin,
+              arch: x86_64,
+              config: src-tauri/tauri.macos.conf.json,
+            }
+          # Windows: NSIS-only on BOTH arches. WiX/MSI hard-errors on
+          # non-numeric semver pre-release identifiers (0.2.0-alpha.1), and
+          # WiX cannot target ARM64 at all. The updater matchers consume the
+          # NSIS *-setup.exe artifacts.
+          - {
+              platform: windows-2022,
+              target: x86_64-pc-windows-msvc,
+              os_name: windows,
+              arch: x86_64,
+              config: src-tauri/tauri.windows.conf.json,
+              extra_args: --bundles nsis,
+            }
+          - {
+              platform: windows-11-arm,
+              target: aarch64-pc-windows-msvc,
+              os_name: windows,
+              arch: aarch64,
+              config: src-tauri/tauri.windows.conf.json,
+              extra_args: --bundles nsis,
+            }
+          - {
+              platform: ubuntu-24.04,
+              target: x86_64-unknown-linux-gnu,
+              os_name: linux,
+              arch: x86_64,
+              config: src-tauri/tauri.linux.conf.json,
+            }
+          - {
+              platform: ubuntu-24.04-arm,
+              target: aarch64-unknown-linux-gnu,
+              os_name: linux,
+              arch: aarch64,
+              config: src-tauri/tauri.linux.conf.json,
+            }
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'pnpm'
+
+      # The pinned toolchain from rust-toolchain.toml is what cargo actually
+      # uses; the toml MUST declare components = ["rustfmt", "clippy"], because
+      # rustup auto-installs it with this action's minimal profile.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache Rust workspace
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.project_path }}/src-tauri
+          shared-key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      # Pinned list: webkit2gtk/libsoup transitions repeatedly break Tauri
+      # builds when Ubuntu images bump versions.
+      - name: Install Linux dependencies
+        if: matrix.os_name == 'linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: >-
+            libwebkit2gtk-4.1-0
+            libwebkit2gtk-4.1-dev
+            libjavascriptcoregtk-4.1-0
+            libjavascriptcoregtk-4.1-dev
+            libsoup-3.0-0
+            libsoup-3.0-dev
+            libgtk-3-dev
+            libayatana-appindicator3-dev
+            librsvg2-dev
+            patchelf
+            xdg-utils
+            libfuse2
+          version: 1.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Rust format check
+        working-directory: ${{ inputs.project_path }}/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy check
+        working-directory: ${{ inputs.project_path }}/src-tauri
+        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+
+      # Materialize the App Store Connect API key (.p8) for notarization.
+      # Stored base64 so it survives the GitHub secrets UI. No-op when unset.
+      - name: Materialize Apple API key
+        id: apple_api_key
+        if: matrix.os_name == 'darwin'
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_BASE64:-}" ]; then
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEY_PATH="${RUNNER_TEMP}/apple_api_key.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "path=${KEY_PATH}" >> "$GITHUB_OUTPUT"
+
+      # CRITICAL: only export Apple env vars that are NON-EMPTY. GitHub renders
+      # unset secrets as empty strings, and tauri-bundler's var_os() treats an
+      # empty-but-set APPLE_CERTIFICATE as "signing configured" — it then runs
+      # `security import` with an empty cert and fails the whole bundle step
+      # (SecKeychainItemImport: parameters not valid).
+      - name: Export Apple signing env (non-empty only)
+        if: matrix.os_name == 'darwin'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ steps.apple_api_key.outputs.path }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name:-}" ]; then
+              echo "${name}=${!name}" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Build and upload via tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Empty-set is CORRECT for passwordless keys (var_os → Some("")).
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ inputs.project_path }}
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.target }} --config ${{ matrix.config }} ${{ matrix.extra_args }}
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # latest.json is assembled by create-updater-json below.
+          includeUpdaterJson: false
+
+      # Gatekeeper gate: when signing IS configured, fail unless the output is
+      # signed + notarized + stapled. No-op on unsigned builds.
+      - name: Verify macOS signing + notarization
+        if: matrix.os_name == 'darwin'
+        env:
+          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "APPLE_SIGNING_IDENTITY unset — unsigned build, skipping Gatekeeper assessment." >&2
+            exit 0
+          fi
+          APP="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
+          DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+          if [ -z "$APP" ] || [ -z "$DMG" ]; then
+            echo "::error::Could not locate the built .app/.dmg under $BUNDLE_DIR" >&2
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          spctl -a -vvv -t install "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "macOS signing + notarization verified."
+
+  create-updater-json:
+    needs: [create-release, build-and-release]
+    runs-on: ubuntu-latest
+    if: always() && needs.build-and-release.result == 'success'
+    steps:
+      - name: Generate updater JSON
+        uses: actions/github-script@v8
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const version = process.env.VERSION;
+            const channel = process.env.CHANNEL;
+            const releaseId = Number(process.env.RELEASE_ID);
+
+            const { data: release } = await github.rest.repos.getRelease({
+              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
+            });
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner, repo: context.repo.repo, release_id: release.id,
+            });
+
+            const platforms = {
+              'darwin-aarch64': { signature: null, url: null },
+              'darwin-x86_64': { signature: null, url: null },
+              'windows-x86_64': { signature: null, url: null },
+              'windows-aarch64': { signature: null, url: null },
+              'linux-x86_64': { signature: null, url: null },
+              'linux-aarch64': { signature: null, url: null },
+            };
+
+            // First-match-wins predicates over asset filenames. Windows uses
+            // the NSIS *-setup.exe on both arches (no MSI in CI — see matrix).
+            const matchers = [
+              { key: 'darwin-aarch64', kind: 'url', test: (n) => n.endsWith('.app.tar.gz') && n.includes('aarch64') },
+              { key: 'darwin-aarch64', kind: 'sig', test: (n) => n.endsWith('.app.tar.gz.sig') && n.includes('aarch64') },
+              { key: 'darwin-x86_64', kind: 'url', test: (n) => n.endsWith('.app.tar.gz') && n.includes('x64') },
+              { key: 'darwin-x86_64', kind: 'sig', test: (n) => n.endsWith('.app.tar.gz.sig') && n.includes('x64') },
+              { key: 'windows-x86_64', kind: 'url', test: (n) => n.endsWith('.exe') && /(_|-)x64(_|-|\.)/i.test(n) },
+              { key: 'windows-x86_64', kind: 'sig', test: (n) => n.endsWith('.exe.sig') && /(_|-)x64(_|-|\.)/i.test(n) },
+              { key: 'windows-aarch64', kind: 'url', test: (n) => n.endsWith('.exe') && /(_|-)arm64(_|-|\.)/i.test(n) },
+              { key: 'windows-aarch64', kind: 'sig', test: (n) => n.endsWith('.exe.sig') && /(_|-)arm64(_|-|\.)/i.test(n) },
+              { key: 'linux-x86_64', kind: 'url', test: (n) => n.endsWith('.AppImage') && /(_|-)amd64\b/i.test(n) },
+              { key: 'linux-x86_64', kind: 'sig', test: (n) => n.endsWith('.AppImage.sig') && /(_|-)amd64\b/i.test(n) },
+              { key: 'linux-aarch64', kind: 'url', test: (n) => n.endsWith('.AppImage') && /(_|-)aarch64\b/i.test(n) },
+              { key: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('.AppImage.sig') && /(_|-)aarch64\b/i.test(n) },
+            ];
+
+            const fetchSignatureBody = async (assetId) => {
+              const sig = await github.rest.repos.getReleaseAsset({
+                owner: context.repo.owner, repo: context.repo.repo,
+                asset_id: assetId, headers: { accept: 'application/octet-stream' },
+              });
+              return Buffer.from(sig.data).toString('utf8');
+            };
+
+            for (const asset of assets) {
+              for (const matcher of matchers) {
+                if (!matcher.test(asset.name)) continue;
+                if (matcher.kind === 'url') {
+                  platforms[matcher.key].url = asset.browser_download_url;
+                } else {
+                  platforms[matcher.key].signature = await fetchSignatureBody(asset.id);
+                }
+                break;
+              }
+            }
+
+            // Incomplete entries stay: verify-release fails loudly rather than
+            // silently shipping a manifest missing a target.
+            const updateManifest = {
+              version: version.replace('v', ''),
+              notes: release.body || 'No release notes provided',
+              pub_date: release.published_at || new Date().toISOString(),
+              platforms,
+            };
+
+            const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: release.id, name: manifestName,
+              data: Buffer.from(JSON.stringify(updateManifest, null, 2), 'utf8'),
+            });
+            console.log(`Uploaded ${manifestName} for channel ${channel}`);
+
+  verify-release:
+    # Fail loud BEFORE the draft flips public: catches missing signatures and
+    # 404 download URLs before users see a broken update prompt.
+    needs: [create-release, build-and-release, create-updater-json]
+    runs-on: ubuntu-latest
+    if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
+    steps:
+      - name: Verify update manifest + asset URLs
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          EXPECTED_VERSION: ${{ needs.create-release.outputs.version }}
+        with:
+          script: |
+            const releaseId = Number(process.env.RELEASE_ID);
+            const channel = process.env.CHANNEL;
+            const expectedVersion = process.env.EXPECTED_VERSION;
+            const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
+
+            const { data: release } = await github.rest.repos.getRelease({
+              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
+            });
+            const manifestAsset = release.assets.find((a) => a.name === manifestName);
+            if (!manifestAsset) { core.setFailed(`Missing update manifest asset: ${manifestName}`); return; }
+
+            const res = await fetch(manifestAsset.browser_download_url, { headers: { 'User-Agent': 'release-verify' } });
+            if (!res.ok) { core.setFailed(`Manifest download HTTP ${res.status}`); return; }
+            const manifest = await res.json();
+
+            const expectedSemver = expectedVersion.replace(/^v/, '');
+            if (manifest.version !== expectedSemver) {
+              core.setFailed(`Manifest version ${manifest.version} != expected ${expectedSemver}`); return;
+            }
+
+            const errors = [];
+            for (const [platform, entry] of Object.entries(manifest.platforms ?? {})) {
+              if (!entry.signature) { errors.push(`${platform}: missing signature`); continue; }
+              if (!entry.url) { errors.push(`${platform}: missing url`); continue; }
+              try {
+                const head = await fetch(entry.url, { method: 'HEAD', headers: { 'User-Agent': 'release-verify' } });
+                if (!head.ok) errors.push(`${platform}: url HTTP ${head.status}`);
+              } catch (err) {
+                errors.push(`${platform}: HEAD failed: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+            if (errors.length) { core.setFailed(`Manifest verification failed:\n  - ${errors.join('\n  - ')}`); return; }
+            core.info(`Verified ${Object.keys(manifest.platforms).length} platforms in ${manifestName}.`);
+
+  publish-release:
+    needs: [create-release, build-and-release, create-updater-json, verify-release]
+    runs-on: ubuntu-latest
+    if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success'
+    steps:
+      - name: Publish release
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner, repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID), draft: false,
+            })
+
+      # alpha/beta poll a fixed rolling release (latest-<channel>); this step
+      # maintains it. Runs after the draft flip so the manifest never points at
+      # draft-only (404) asset URLs.
+      - name: Mirror channel manifest to rolling release
+        if: needs.create-release.outputs.channel != 'stable'
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          APP_NAME: ${{ inputs.app_display_name }}
+        with:
+          script: |
+            const releaseId = Number(process.env.RELEASE_ID);
+            const channel = process.env.CHANNEL;
+            const appName = process.env.APP_NAME;
+            const { owner, repo } = context.repo;
+            const manifestName = `latest-${channel}.json`;
+
+            const { data: versioned } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
+            const manifestAsset = versioned.assets.find((a) => a.name === manifestName);
+            if (!manifestAsset) { core.setFailed(`Versioned release missing ${manifestName}`); return; }
+            const download = await github.rest.repos.getReleaseAsset({
+              owner, repo, asset_id: manifestAsset.id, headers: { accept: 'application/octet-stream' },
+            });
+
+            const rollingTag = `latest-${channel}`;
+            let rolling;
+            try {
+              rolling = (await github.rest.repos.getReleaseByTag({ owner, repo, tag: rollingTag })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              rolling = (await github.rest.repos.createRelease({
+                owner, repo, tag_name: rollingTag,
+                name: `${appName} ${channel} channel`,
+                body: `Rolling release backing the ${channel} auto-update channel. Its latest.json is replaced by every ${channel} release — do not edit or delete.`,
+                prerelease: true,
+              })).data;
+            }
+            const stale = rolling.assets.find((a) => a.name === 'latest.json');
+            if (stale) await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: stale.id });
+            await github.rest.repos.uploadReleaseAsset({
+              owner, repo, release_id: rolling.id, name: 'latest.json', data: Buffer.from(download.data),
+            });
+            console.log(`Mirrored ${manifestName} to ${rollingTag}/latest.json`);
+
+  # Post-release patch bump PR (stable releases only). Default GITHUB_TOKEN
+  # pushes don't trigger workflows — re-run CI on the PR manually if needed.
+  bump-version:
+    needs: [create-release, build-and-release]
+    runs-on: ubuntu-latest
+    if: needs.build-and-release.result == 'success' && needs.create-release.outputs.channel == 'stable'
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      RELEASED_VERSION: ${{ needs.create-release.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PROJECT_PATH: ${{ inputs.project_path }}
+      CARGO_PACKAGE: ${{ inputs.cargo_package }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Compute next patch version
+        id: next
+        run: |
+          set -euo pipefail
+          BARE="${RELEASED_VERSION#v}"
+          if ! printf '%s' "$BARE" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Released version '$BARE' is not plain semver. Skipping bump."
+            exit 1
+          fi
+          NEXT=$(python3 -c "
+          import sys
+          parts = sys.argv[1].split('.')
+          parts[2] = str(int(parts[2]) + 1)
+          print('.'.join(parts))
+          " "$BARE")
+          echo "BARE=$BARE" >> "$GITHUB_OUTPUT"
+          echo "NEXT=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "BRANCH=chore/bump-version-${NEXT}" >> "$GITHUB_OUTPUT"
+
+      - name: Update version files
+        env:
+          BARE: ${{ steps.next.outputs.BARE }}
+          NEXT: ${{ steps.next.outputs.NEXT }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json, os, re
+          from pathlib import Path
+
+          released = os.environ["BARE"]
+          new = os.environ["NEXT"]
+          proj = Path(os.environ["PROJECT_PATH"])
+          pkg = os.environ["CARGO_PACKAGE"]
+
+          json_targets = [
+              Path("package.json"),
+              proj / "package.json",
+              proj / "src-tauri" / "tauri.conf.json",
+              proj / "src-tauri" / "tauri.macos.conf.json",
+              proj / "src-tauri" / "tauri.windows.conf.json",
+              proj / "src-tauri" / "tauri.linux.conf.json",
+          ]
+          seen = set()
+          for path in json_targets:
+              key = path.resolve()
+              if key in seen or not path.exists():
+                  continue
+              seen.add(key)
+              text = path.read_text()
+              ends_nl = text.endswith("\n")
+              data = json.loads(text)
+              if data.get("version") == released:
+                  data["version"] = new
+                  out = json.dumps(data, indent=2) + ("\n" if ends_nl else "")
+                  path.write_text(out)
+                  print(f"updated {path}")
+
+          cargo_toml = proj / "src-tauri" / "Cargo.toml"
+          if cargo_toml.exists():
+              text = cargo_toml.read_text()
+              new_text, n = re.subn(r'(?m)^version\s*=\s*"' + re.escape(released) + r'"', f'version = "{new}"', text, count=1)
+              if n: cargo_toml.write_text(new_text); print("updated Cargo.toml")
+
+          cargo_lock = proj / "src-tauri" / "Cargo.lock"
+          if cargo_lock.exists():
+              text = cargo_lock.read_text()
+              pat = re.compile(r'(\[\[package\]\]\nname = "' + re.escape(pkg) + r'"\nversion = ")[^"]+(")')
+              new_text, n = pat.subn(lambda m: m.group(1) + new + m.group(2), text, count=1)
+              if n: cargo_lock.write_text(new_text); print("updated Cargo.lock")
+          PY
+
+      - name: Commit and open PR
+        env:
+          NEXT: ${{ steps.next.outputs.NEXT }}
+          BRANCH: ${{ steps.next.outputs.BRANCH }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "::warning::Version files already at next patch; nothing to bump."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore: bump version to ${NEXT}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: bump version to ${NEXT}" \
+            --body "Automated post-release bump after publishing \`${RELEASED_VERSION}\`." \
+            --base "$BASE_BRANCH" \
+            --head "$BRANCH"

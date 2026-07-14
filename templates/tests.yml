@@ -1,0 +1,21 @@
+# Thin caller for the shared Rust quality gates. Runs on branch pushes so a
+# release tag never discovers gate failures (macOS-local checks cannot see
+# Linux/Windows diagnostics in cfg-gated code).
+name: Rust checks
+
+on:
+  push:
+    branches: [main, alpha, beta, dev]
+  pull_request:
+    branches: [main, alpha, beta, dev]
+
+concurrency:
+  group: rust-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    uses: entro314-labs/tauri-release-kit/.github/workflows/rust-checks.yml@main
+    with:
+      project_path: 'apps/desktop'   # ← '.' for single-app repos
+      run_tests: true

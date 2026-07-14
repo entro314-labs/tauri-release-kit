@@ -1,0 +1,32 @@
+# Thin caller for the shared Tauri release pipeline.
+# Copy to .github/workflows/release.yml in your app repo and fill in the
+# three inputs. Full consumer checklist: tauri-release-kit README.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0, v1.0.0-alpha.1)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      app_display_name: 'MyApp'        # ← release titles: "MyApp v1.0.0"
+      project_path: 'apps/desktop'     # ← '.' for single-app repos
+      cargo_package: 'myapp'           # ← [[package]] name in Cargo.lock
+      tag: ${{ inputs.tag || '' }}
+    secrets: inherit
