@@ -1,6 +1,6 @@
 # Thin caller for the shared Tauri release pipeline.
 # Copy to .github/workflows/release.yml in your app repo and fill in the
-# three inputs. Full consumer checklist: tauri-release-kit README.
+# inputs. Full consumer checklist: tauri-release-kit README.
 name: Release
 
 on:
@@ -29,4 +29,17 @@ jobs:
       project_path: 'apps/desktop'     # ← '.' for single-app repos
       cargo_package: 'myapp'           # ← [[package]] name in Cargo.lock
       tag: ${{ inputs.tag || '' }}
+      # --- Cross-repo publishing (REQUIRED for private app repos: private
+      #     release assets 404 anonymously, breaking downloads + auto-update).
+      #     Needs the RELEASES_TOKEN secret (fine-grained PAT, Contents:RW on
+      #     the releases repo). Omit both for public single-repo apps.
+      releases_repo: 'my-org/myapp-releases'
+      # --- Homebrew cask publishing (optional; omit homebrew_tap to skip).
+      #     Stable → "myapp" cask; alpha/beta → "myapp@alpha" / "myapp@beta".
+      #     Needs the HOMEBREW_TAP_TOKEN secret (Contents:RW on the tap).
+      product_name: 'myapp'            # ← tauri.conf.json productName (asset filename stem)
+      homebrew_tap: 'my-org/homebrew-tap'
+      cask_desc: 'One-line app description'
+      cask_homepage: 'https://example.com'
+      bundle_identifier: 'com.example.myapp' # ← tauri.conf.json identifier (cask zap paths)
     secrets: inherit

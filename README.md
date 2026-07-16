@@ -3,12 +3,14 @@
 Shared CI/CD + versioning for entro314-labs Tauri apps. One reusable release
 pipeline — 6-platform build matrix, minisign-signed auto-updater artifacts,
 per-channel rolling update manifests (`stable` / `beta` / `alpha`), changelog
-guard, pre-publish verification, post-release version-bump PR — plus reusable
-Rust quality gates and a version sync script.
+guard, cross-repo publishing to a public releases mirror, pre-publish
+verification, optional Homebrew cask publishing, post-release version-bump PR
+— plus reusable Rust quality gates and a version sync script.
 
-Extracted from anasa's first release (v0.2.0-alpha.1, 2026-07-14), which took
-six workflow runs to get green. Every odd-looking step encodes one of those
-failures; read [docs/GOTCHAS.md](docs/GOTCHAS.md) before "simplifying" anything.
+Extracted from anasa's first releases (v0.2.0-alpha.1 2026-07-14, re-extracted
+after v0.2.0-alpha.2 shipped end-to-end 2026-07-16). Every odd-looking step
+encodes a failure that actually happened; read [docs/GOTCHAS.md](docs/GOTCHAS.md)
+before "simplifying" anything.
 
 ## What consumers call
 
@@ -24,7 +26,10 @@ app picks them up. Pin `@main` for latest or a tag for stability.
 
 1. **Copy the callers** from `templates/`:
    - `templates/release.yml` → `.github/workflows/release.yml` (fill in
-     `app_display_name`, `project_path`, `cargo_package`)
+     `app_display_name`, `project_path`, `cargo_package`; for private app
+     repos also `releases_repo` + the `RELEASES_TOKEN` secret; for Homebrew,
+     `product_name`, `homebrew_tap`, `cask_desc`, `cask_homepage`,
+     `bundle_identifier` + the `HOMEBREW_TAP_TOKEN` secret)
    - `templates/tests.yml` → `.github/workflows/tests.yml`
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
@@ -35,8 +40,9 @@ app picks them up. Pin `@main` for latest or a tag for stability.
    - Per-OS overlay configs exist: `tauri.macos.conf.json`,
      `tauri.windows.conf.json`, `tauri.linux.conf.json` (even if minimal —
      the workflow passes `--config` per platform)
-   - `plugins.updater.endpoints`:
-     - stable: `https://github.com/<org>/<repo>/releases/latest/download/latest.json`
+   - `plugins.updater.endpoints` (point at the RELEASES repo when
+     `releases_repo` is set — a PRIVATE app repo can never serve updates):
+     - stable: `https://github.com/<org>/<releases-repo>/releases/latest/download/latest.json`
      - alpha/beta channels poll `releases/download/latest-<channel>/latest.json`
        (the pipeline maintains those rolling releases automatically)
 
@@ -74,6 +80,17 @@ app picks them up. Pin `@main` for latest or a tag for stability.
 
 This repo is private, so callers need access: **Settings → Actions → General →
 Access → "Accessible from repositories in the entro314-labs organization"**.
+
+Cross-repo secrets (per app, or org-level shared to selected repos):
+
+- `RELEASES_TOKEN` — fine-grained PAT, **Contents: Read and write** on the
+  releases repo only. Required whenever `releases_repo` is set.
+- `HOMEBREW_TAP_TOKEN` — fine-grained PAT, **Contents: Read and write** on the
+  tap repo only. The cask job skips with a warning when absent.
+
+Use scoped fine-grained PATs, not a broad classic token — and note that
+fine-grained PATs EXPIRE (a vanished `RELEASES_TOKEN` cost anasa a release
+attempt); calendar the renewal.
 
 ## Cost notes
 

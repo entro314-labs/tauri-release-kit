@@ -115,3 +115,46 @@ re-read this first.
   flips public.
 - **A brand-new releases repo needs an initial commit** before any release can
   be created ("Repository is empty" — tags need a commit to point at).
+
+## Lessons from anasa v0.2.0-alpha.2 (2026-07-16) — all baked into release.yml
+
+- **`awalsh128/cache-apt-pkgs-action` silently installs NOTHING sometimes**:
+  on the ubuntu-24.04-arm leg it logged "Clean installing 12 packages... done"
+  while the installed-package list was empty ("Caching 0 installed packages"),
+  and the build died at glib-sys/pkg-config ten minutes later. A release must
+  fail loudly at the install step. Use plain `apt-get install`; the caching
+  saved ~40 seconds per run.
+- **linuxdeploy needs FUSE2 AND a working strip**: the 24.04 runner images
+  (20260714+) dropped `libfuse2` (install `libfuse2t64`), and linuxdeploy's
+  bundled strip pass breaks against the image's binutils even with FUSE
+  present ("failed to run linuxdeploy" with no stderr). Set `NO_STRIP=true` —
+  cargo's release profile already strips the shipped binary.
+- **"failed to run linuxdeploy" can also mean DISK FULL**: a job that builds a
+  cargo debug tree (tests) plus a release tree plus node_modules can exhaust
+  the ~14 GB free on stock runners; the only clue is a buried "You are running
+  out of disk space" warning. Free the preinstalled bloat
+  (`sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc`) and drop
+  `target/debug` before bundling.
+- **pnpm 11 forwards a literal `--` into run-scripts**: `pnpm run tauri:build
+  -- --config X` now executes `tauri build -- --config X`, and tauri passes
+  everything after `--` to CARGO, whose own `--config` parser then fails with
+  a baffling "dotted key expression" error. Invoke `pnpm exec tauri build`
+  directly.
+- **tauri-action v1 renamed `includeUpdaterJson` → `uploadUpdaterJson`**: the
+  old name is silently ignored, so tauri-action uploads its own latest.json
+  next to the one this pipeline assembles.
+- **WiX/MSI rejects non-numeric prerelease identifiers** (`0.2.0-alpha.2`) at
+  bundle time and cannot target ARM64 — prerelease Windows builds must pass
+  `--bundles nsis` anywhere they build, including smoke gates.
+- **Zero-step job failures with BlobNotFound logs = GitHub Actions BILLING**
+  (spending limit hit / payment failed), not a workflow bug. The only place
+  the real reason appears is the check-run ANNOTATION, not the logs.
+- **Reruns use the original workflow snapshot**: fixing the workflow file does
+  nothing for `gh run rerun` — recycle the tag (delete the stale draft first)
+  so the new run picks up the fix.
+- **Windows default step shell is pwsh**: multi-line `\` continuations in
+  cross-platform `run:` blocks die with "Missing expression after unary
+  operator '--'". Set `shell: bash` explicitly.
+- **oxfmt ≥0.59 exits non-zero when every matched file is ignore-listed** —
+  gates that "format then diff" a deliberately formatter-ignored file now fail
+  before the diff runs.

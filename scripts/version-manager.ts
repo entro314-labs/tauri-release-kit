@@ -1,125 +1,252 @@
 #!/usr/bin/env node
-/* oxlint-disable no-console -- CLI tool; console is its output channel */
+/* oxlint-disable no-console -- this is a CLI tool; console is its output channel */
 
 /**
- * Version manager for Tauri apps using tauri-release-kit.
+ * Version Manager for Anasa.
  *
- * Bumps the app version coherently across every file the release workflow's
- * `bump-version` job touches, so a local bump produces the same result CI
- * would. Reads the CURRENT version from the root `package.json` (single
- * source of truth) and increments the requested semver part.
+ * Bumps the app version coherently across every file the release `bump-version` CI job touches, so
+ * a local `pnpm version:*` produces the same result CI would. It reads the CURRENT version from the
+ * root `package.json` (the single source of truth) and increments the requested semver part.
  *
- * Usage:
- *   tsx scripts/version-manager.ts patch [--project-path apps/desktop] [--dry-run]
- *   tsx scripts/version-manager.ts minor
- *   tsx scripts/version-manager.ts set 1.2.0-alpha.1   # explicit (pre-release OK)
- *
- * `set` accepts pre-release semver (the bump parts do not) — needed for
- * alpha/beta tags, which MUST match the version baked into the binaries or
- * the updater's version comparison misbehaves.
+ * It deliberately does NOT generate from a build counter: the previous implementation hardcoded
+ * `0.1.<counter>`, so it could only ever emit `0.1.x` and — because the counter drifted from
+ * reality (the app is already past 0.1.190) — running it would have RESET the real version. This
+ * mirrors `.github/workflows/release-with-updater.yml` → `bump-version` (patch+1 by default,
+ * surgical per-file rewrites of the same target set).
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-type Part = 'major' | 'minor' | 'patch'
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const projectRoot = join(__dirname, '../..')
 
-const args = process.argv.slice(2)
-const command = args[0]
-const dryRun = args.includes('--dry-run')
-const projIdx = args.indexOf('--project-path')
-const projectPath = projIdx >= 0 ? args[projIdx + 1] : '.'
+type VersionFileType = 'json' | 'toml' | 'cargo-lock'
+type VersionPart = 'major' | 'minor' | 'patch'
 
-const PLAIN_SEMVER = /^(\d+)\.(\d+)\.(\d+)$/
-const FULL_SEMVER = /^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/
-
-function fail(message: string): never {
-  console.error(`error: ${message}`)
-  process.exit(1)
+interface VersionFile {
+  path: string
+  type: VersionFileType
+  /** JSON/TOML: the version key. `cargo-lock`: the `[[package]]` name whose version to bump. */
+  key: string
 }
 
-function readRootVersion(): string {
-  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { version?: unknown }
-  if (typeof pkg.version !== 'string' || !FULL_SEMVER.test(pkg.version)) {
-    fail(`root package.json version is not semver: ${String(pkg.version)}`)
+interface VersionOptions {
+  part?: VersionPart
+  dryRun?: boolean
+}
+
+const ROOT_PACKAGE_JSON = join(projectRoot, 'package.json')
+const tauri = (file: string): string => join(projectRoot, 'apps', 'desktop', 'src-tauri', file)
+
+// Every file the release `bump-version` job rewrites — kept in lockstep so a local bump matches CI.
+// The per-OS tauri overrides carry no top-level `version`, so they are silently skipped (see the
+// match-old-version guard in updateJsonVersion); they are listed only to document the full target set.
+const VERSION_FILES: VersionFile[] = [
+  { path: ROOT_PACKAGE_JSON, type: 'json', key: 'version' },
+  { path: join(projectRoot, 'apps', 'desktop', 'package.json'), type: 'json', key: 'version' },
+  { path: tauri('tauri.conf.json'), type: 'json', key: 'version' },
+  { path: tauri('tauri.macos.conf.json'), type: 'json', key: 'version' },
+  { path: tauri('tauri.windows.conf.json'), type: 'json', key: 'version' },
+  { path: tauri('tauri.linux.conf.json'), type: 'json', key: 'version' },
+  { path: tauri('Cargo.toml'), type: 'toml', key: 'version' },
+  { path: tauri('Cargo.lock'), type: 'cargo-lock', key: 'anasa' },
+]
+
+const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/
+// Full semver incl. pre-release — accepted by `set` and when READING the current version
+// (channel releases leave e.g. 0.2.0-alpha.1 in the files).
+const FULL_SEMVER_RE = /^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/
+
+/** Read the current version from the root `package.json` — the single source of truth. */
+function readCurrentVersion(): string {
+  const pkg = JSON.parse(readFileSync(ROOT_PACKAGE_JSON, 'utf8')) as { version?: unknown }
+  const version = pkg.version
+  if (typeof version !== 'string' || !FULL_SEMVER_RE.test(version)) {
+    throw new Error(`Root package.json version is not semver: ${String(version)}`)
   }
-  return pkg.version
+  return version
 }
 
-function bump(current: string, part: Part): string {
-  const m = PLAIN_SEMVER.exec(current)
-  if (!m) fail(`cannot ${part}-bump a pre-release version (${current}); use "set X.Y.Z" first`)
-  let [major, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])]
-  if (part === 'major') { major += 1; minor = 0; patch = 0 }
-  else if (part === 'minor') { minor += 1; patch = 0 }
-  else patch += 1
+/** Increment one semver part, zeroing the lower parts. */
+function bumpVersion(current: string, part: VersionPart): string {
+  const match = SEMVER_RE.exec(current)
+  if (!match) {
+    throw new Error(
+      `Cannot increment a pre-release version (${current}); use \`set X.Y.Z[-suffix]\` instead`,
+    )
+  }
+  let major = Number(match[1])
+  let minor = Number(match[2])
+  let patch = Number(match[3])
+  if (part === 'major') {
+    major += 1
+    minor = 0
+    patch = 0
+  } else if (part === 'minor') {
+    minor += 1
+    patch = 0
+  } else {
+    patch += 1
+  }
   return `${major}.${minor}.${patch}`
 }
 
-function cargoPackageName(cargoTomlPath: string): string {
-  const text = readFileSync(cargoTomlPath, 'utf8')
-  const m = /(?:^|\n)name\s*=\s*"([^"]+)"/.exec(text)
-  if (!m) fail(`could not read package name from ${cargoTomlPath}`)
-  return m[1]
+type UpdateOutcome = 'updated' | 'skipped' | 'missing'
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Update a top-level JSON `version` key only when it currently equals `oldVersion` (surgical,
+ * matches CI). Files without the key — the per-OS tauri overrides — are left untouched rather than
+ * gaining a spurious `version` field.
+ */
+function updateJsonVersion(
+  filePath: string,
+  key: string,
+  oldVersion: string,
+  newVersion: string,
+): UpdateOutcome {
+  if (!existsSync(filePath)) return 'missing'
+  const text = readFileSync(filePath, 'utf8')
+  const endsWithNewline = text.endsWith('\n')
+  const content = JSON.parse(text) as Record<string, unknown>
+  if (content[key] !== oldVersion) return 'skipped'
+  content[key] = newVersion
+  writeFileSync(filePath, JSON.stringify(content, null, 2) + (endsWithNewline ? '\n' : ''))
+  return 'updated'
 }
 
-function updateJson(path: string, from: string, to: string): boolean {
-  if (!existsSync(path)) return false
-  const text = readFileSync(path, 'utf8')
-  const needle = `"version": "${from}"`
-  if (!text.includes(needle)) return false
-  if (!dryRun) writeFileSync(path, text.replace(needle, `"version": "${to}"`))
-  return true
+/** Update the first `version = "<old>"` line in a TOML file (the Cargo.toml package version). */
+function updateTomlVersion(
+  filePath: string,
+  key: string,
+  oldVersion: string,
+  newVersion: string,
+): UpdateOutcome {
+  if (!existsSync(filePath)) return 'missing'
+  const text = readFileSync(filePath, 'utf8')
+  const re = new RegExp(`^${escapeRegExp(key)}\\s*=\\s*"${escapeRegExp(oldVersion)}"`, 'm')
+  if (!re.test(text)) return 'skipped'
+  writeFileSync(filePath, text.replace(re, `${key} = "${newVersion}"`))
+  return 'updated'
 }
 
-const current = readRootVersion()
-let next: string
-if (command === 'set') {
-  const explicit = args[1]
-  if (!explicit || !FULL_SEMVER.test(explicit)) fail('usage: set X.Y.Z[-suffix]')
-  next = explicit
-} else if (command === 'major' || command === 'minor' || command === 'patch') {
-  next = bump(current, command)
-} else {
-  fail('usage: version-manager.ts <major|minor|patch|set X.Y.Z[-suffix]> [--project-path <dir>] [--dry-run]')
+/** Bump the version inside the `[[package]] name = "<pkg>"` block of a Cargo.lock. */
+function updateCargoLockVersion(
+  filePath: string,
+  pkgName: string,
+  _oldVersion: string,
+  newVersion: string,
+): UpdateOutcome {
+  if (!existsSync(filePath)) return 'missing'
+  const text = readFileSync(filePath, 'utf8')
+  const re = new RegExp(
+    `(\\[\\[package\\]\\]\\nname = "${escapeRegExp(pkgName)}"\\nversion = ")[^"]+(")`,
+  )
+  if (!re.test(text)) return 'skipped'
+  writeFileSync(filePath, text.replace(re, `$1${newVersion}$2`))
+  return 'updated'
 }
 
-const tauriDir = join(projectPath, 'src-tauri')
-const cargoToml = join(tauriDir, 'Cargo.toml')
-const cargoLock = join(tauriDir, 'Cargo.lock')
-
-const jsonTargets = new Set([
-  'package.json',
-  join(projectPath, 'package.json'),
-  join(tauriDir, 'tauri.conf.json'),
-  join(tauriDir, 'tauri.macos.conf.json'),
-  join(tauriDir, 'tauri.windows.conf.json'),
-  join(tauriDir, 'tauri.linux.conf.json'),
-])
-
-for (const target of jsonTargets) {
-  const updated = updateJson(target, current, next)
-  console.log(`${updated ? 'updated' : 'skipped'} ${target}`)
-}
-
-if (existsSync(cargoToml)) {
-  const text = readFileSync(cargoToml, 'utf8')
-  const pattern = new RegExp(`(?<=^|\\n)version = "${current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`)
-  if (pattern.test(text)) {
-    if (!dryRun) writeFileSync(cargoToml, text.replace(pattern, `version = "${next}"`))
-    console.log(`updated ${cargoToml}`)
+function updateFile(file: VersionFile, oldVersion: string, newVersion: string): UpdateOutcome {
+  switch (file.type) {
+    case 'json':
+      return updateJsonVersion(file.path, file.key, oldVersion, newVersion)
+    case 'toml':
+      return updateTomlVersion(file.path, file.key, oldVersion, newVersion)
+    case 'cargo-lock':
+      return updateCargoLockVersion(file.path, file.key, oldVersion, newVersion)
   }
+}
 
-  if (existsSync(cargoLock)) {
-    const pkg = cargoPackageName(cargoToml)
-    const lockText = readFileSync(cargoLock, 'utf8')
-    const blockPattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${pkg}"\\nversion = ")[^"]+(")`)
-    if (blockPattern.test(lockText)) {
-      if (!dryRun) writeFileSync(cargoLock, lockText.replace(blockPattern, `$1${next}$2`))
-      console.log(`updated ${cargoLock} ([[package]] ${pkg})`)
+/** Current version, read from the root package.json. */
+export function getCurrentVersion(): { version: string } {
+  return { version: readCurrentVersion() }
+}
+
+/**
+ * Set an explicit version (pre-release allowed) across every target file. Channel releases REQUIRE
+ * this: the tag's version must match the version baked into the binaries or the updater's
+ * comparison misbehaves (e.g. `set 0.3.0-alpha.1` before tagging v0.3.0-alpha.1).
+ */
+export function setVersion(explicit: string, dryRun = false): { from: string; to: string } {
+  if (!FULL_SEMVER_RE.test(explicit)) {
+    throw new Error(`Not a semver version: ${explicit}`)
+  }
+  const from = readCurrentVersion()
+  if (!dryRun) {
+    for (const file of VERSION_FILES) {
+      console.log(`${updateFile(file, from, explicit).padEnd(8)} ${file.path}`)
     }
   }
+  return { from, to: explicit }
 }
 
-console.log(`\n${current} -> ${next}${dryRun ? ' (dry run)' : ''}`)
-console.log(`Next: update CHANGELOG.md with a "## [${next}]" heading, commit, then tag v${next}.`)
+/** Bump the version across every target file. Returns the from/to pair. */
+export function incrementVersion(options: VersionOptions = {}): {
+  from: string
+  to: string
+  dryRun: boolean
+} {
+  const { part = 'patch', dryRun = false } = options
+  const from = readCurrentVersion()
+  const to = bumpVersion(from, part)
+  if (!dryRun) {
+    for (const file of VERSION_FILES) {
+      console.log(`${updateFile(file, from, to).padEnd(8)} ${file.path}`)
+    }
+  }
+  return { from, to, dryRun }
+}
+
+// CLI interface
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const args = process.argv.slice(2)
+  const command = args[0] ?? 'increment'
+  // `--patch` is the default; `--build` (legacy) maps to a patch bump, since the patch component has
+  // always been the de-facto build number.
+  const part: VersionPart = args.includes('--major')
+    ? 'major'
+    : args.includes('--minor')
+      ? 'minor'
+      : 'patch'
+  const dryRun = args.includes('--dry-run')
+
+  switch (command) {
+    case 'increment':
+    case 'inc': {
+      const result = incrementVersion({ part, dryRun })
+      console.log(`${dryRun ? '[dry-run] ' : ''}${result.from} -> ${result.to}`)
+      break
+    }
+
+    case 'set': {
+      const explicit = args[1]
+      if (!explicit) {
+        console.error('Usage: version-manager.ts set X.Y.Z[-suffix]')
+        process.exit(1)
+      }
+      const result = setVersion(explicit, dryRun)
+      console.log(`${dryRun ? '[dry-run] ' : ''}${result.from} -> ${result.to}`)
+      break
+    }
+
+    case 'current':
+    case 'info':
+      console.log(getCurrentVersion().version)
+      break
+
+    case 'help':
+      console.log(
+        'Usage: version-manager.ts [increment|set X.Y.Z[-suffix]|current] [--major|--minor|--patch] [--dry-run]',
+      )
+      break
+
+    default:
+      console.error(`Unknown command: ${command}`)
+      process.exit(1)
+  }
+}

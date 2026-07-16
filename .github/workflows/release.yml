@@ -1,11 +1,12 @@
 # Reusable Tauri release workflow: 6-platform build matrix, minisign-signed
 # auto-updater artifacts, per-channel rolling update manifests, changelog guard,
-# release verification, and a post-release version-bump PR.
+# release verification, optional Homebrew cask publishing, and a post-release
+# version-bump PR.
 #
-# Extracted from anasa's release-with-updater.yml after its first release
-# shipped; every non-obvious step below encodes a failure that actually
-# happened. See README.md for the consumer checklist and docs/GOTCHAS.md for
-# the war stories.
+# Re-extracted from anasa's release-with-updater.yml after v0.2.0-alpha.2
+# shipped end-to-end (2026-07-16); every non-obvious step below encodes a
+# failure that actually happened. See README.md for the consumer checklist and
+# docs/GOTCHAS.md for the war stories.
 #
 # Conventions this workflow assumes about the calling repo:
 #   - pnpm + a `pnpm run build` invoked by tauri.conf.json's beforeBuildCommand
@@ -17,11 +18,16 @@
 #     clippy gates fail on every platform)
 #   - CHANGELOG.md with a `## [X.Y.Z...]` heading per released tag
 #   - bundle.createUpdaterArtifacts: true and the updater pubkey in
-#     tauri.conf.json; the updater polls:
+#     tauri.conf.json; the updater polls (on the RELEASES repo when
+#     releases_repo is set):
 #       stable      → releases/latest/download/latest.json
 #       alpha/beta  → releases/download/latest-<channel>/latest.json
 #   - Windows ships NSIS only (WiX/MSI hard-rejects non-numeric semver
-#     pre-release identifiers like `-alpha.1`)
+#     pre-release identifiers like `-alpha.1`, and WiX cannot target ARM64)
+#
+# PRIVATE app repos MUST set `releases_repo` to a PUBLIC repo + provide
+# RELEASES_TOKEN: private-repo release assets 404 for unauthenticated users,
+# which silently breaks both downloads and the auto-updater.
 
 name: Release (reusable)
 
@@ -51,12 +57,65 @@ on:
         required: false
         type: string
         default: '24'
+      releases_repo:
+        description: >-
+          'owner/name' of the repo that hosts the GitHub releases (and the
+          rolling latest-<channel> updater manifests). Empty = this repo.
+          REQUIRED (with the RELEASES_TOKEN secret) when the app repo is
+          private — private release assets 404 anonymously, breaking downloads
+          and auto-update.
+        required: false
+        type: string
+        default: ''
+      product_name:
+        description: >-
+          tauri.conf.json productName — the filename stem of bundled assets
+          (<product>_<version>_aarch64.dmg) and the .app bundle name. Required
+          for Homebrew cask publishing; unused otherwise.
+        required: false
+        type: string
+        default: ''
+      homebrew_tap:
+        description: >-
+          'owner/name' of a Homebrew tap repo to publish a macOS cask to
+          (stable → "<product_name>", prerelease → "<product_name>@<channel>").
+          Empty = skip cask publishing. Requires product_name + the
+          HOMEBREW_TAP_TOKEN secret (skips with a warning when absent).
+        required: false
+        type: string
+        default: ''
+      cask_desc:
+        description: 'One-line description for the Homebrew cask'
+        required: false
+        type: string
+        default: ''
+      cask_homepage:
+        description: 'Homepage URL for the Homebrew cask'
+        required: false
+        type: string
+        default: ''
+      bundle_identifier:
+        description: >-
+          tauri.conf.json identifier (e.g. com.example.app). When set, the cask
+          gets a `zap trash:` block for the standard ~/Library paths.
+        required: false
+        type: string
+        default: ''
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         description: 'minisign private key for updater artifact signatures (REQUIRED — createUpdaterArtifacts fails without it)'
         required: true
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
         description: 'Password for the updater key; omit for passwordless keys'
+        required: false
+      RELEASES_TOKEN:
+        description: >-
+          Fine-grained PAT with Contents:RW on releases_repo. Required when
+          releases_repo is set (the default GITHUB_TOKEN cannot write
+          cross-repo); ignored otherwise.
+        required: false
+      HOMEBREW_TAP_TOKEN:
+        description: 'Fine-grained PAT with Contents:RW on homebrew_tap. Cask publishing skips with a warning when absent.'
         required: false
       APPLE_CERTIFICATE:
         required: false
@@ -78,15 +137,21 @@ on:
         required: false
 
 jobs:
-  # Fail fast: no CHANGELOG entry for the tag → no matrix spin-up.
+  # Fail fast: no CHANGELOG entry for the tag (or a missing cross-repo token)
+  # → no matrix spin-up. macOS runners bill 10× on private repos; every gate
+  # that can run on ubuntu first, does.
   check-changelog:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolved.outputs.VERSION }}
+      # 'owner name' pair resolved once; jobs re-split it (expressions have no split()).
+      releases_owner: ${{ steps.relrepo.outputs.OWNER }}
+      releases_name: ${{ steps.relrepo.outputs.NAME }}
     env:
       INPUT_TAG: ${{ inputs.tag }}
+      RELEASES_REPO: ${{ inputs.releases_repo }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve version
         id: resolved
@@ -102,6 +167,26 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "BARE=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve releases repo
+        id: relrepo
+        run: |
+          REPO="${RELEASES_REPO:-$GITHUB_REPOSITORY}"
+          echo "OWNER=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "NAME=${REPO##*/}" >> "$GITHUB_OUTPUT"
+
+      # Cross-repo mode is all-or-nothing: catching a missing token here costs
+      # seconds; catching it at publish costs a full 6-platform build.
+      - name: Preflight - RELEASES_TOKEN present when cross-repo
+        if: inputs.releases_repo != ''
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if [ -z "${RELEASES_TOKEN:-}" ]; then
+            echo "::error::releases_repo is set but the RELEASES_TOKEN secret is missing — create a fine-grained PAT with Contents:RW on ${RELEASES_REPO}"
+            exit 1
+          fi
+          echo "RELEASES_TOKEN present."
 
       - name: Verify CHANGELOG entry exists
         env:
@@ -139,19 +224,26 @@ jobs:
             echo "CHANNEL=stable" >> $GITHUB_OUTPUT
           fi
 
+      # The draft is created on the releases repo (which may be a public
+      # mirror — see the header note on private repos). On publish, GitHub
+      # creates the tag on that repo's default branch.
       - name: Create draft release
         id: create-release
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           VERSION: ${{ needs.check-changelog.outputs.version }}
           CHANNEL: ${{ steps.get_channel.outputs.CHANNEL }}
           APP_NAME: ${{ inputs.app_display_name }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
+          # Default GITHUB_TOKEN cannot write to another repo.
+          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { VERSION, CHANNEL, APP_NAME } = process.env;
+            const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME } = process.env;
             const { data } = await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: REL_OWNER,
+              repo: REL_NAME,
               tag_name: VERSION,
               name: `${APP_NAME} ${VERSION}`,
               body: 'Take a look at the assets to download and install this version.',
@@ -161,7 +253,7 @@ jobs:
             return data.id
 
   build-and-release:
-    needs: create-release
+    needs: [check-changelog, create-release]
     strategy:
       fail-fast: false
       matrix:
@@ -183,10 +275,11 @@ jobs:
               arch: x86_64,
               config: src-tauri/tauri.macos.conf.json,
             }
-          # Windows: NSIS-only on BOTH arches. WiX/MSI hard-errors on
-          # non-numeric semver pre-release identifiers (0.2.0-alpha.1), and
-          # WiX cannot target ARM64 at all. The updater matchers consume the
-          # NSIS *-setup.exe artifacts.
+          # Windows: pinned to windows-2022 while WebView2 + Tauri behaviour on
+          # the windows-2025 images stabilises. NSIS-only on BOTH arches:
+          # WiX/MSI hard-errors on non-numeric semver pre-release identifiers
+          # (0.2.0-alpha.1) and cannot target ARM64 at all. The updater
+          # matchers consume the NSIS *-setup.exe artifacts.
           - {
               platform: windows-2022,
               target: x86_64-pc-windows-msvc,
@@ -221,13 +314,13 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node_version }}
           cache: 'pnpm'
@@ -248,26 +341,30 @@ jobs:
           shared-key: ${{ matrix.target }}
           cache-on-failure: true
 
-      # Pinned list: webkit2gtk/libsoup transitions repeatedly break Tauri
-      # builds when Ubuntu images bump versions.
+      # Plain apt-get, NOT awalsh128/cache-apt-pkgs-action: on the arm64 leg
+      # of anasa v0.2.0-alpha.2 that action reported "Clean installing 12
+      # packages... done" while actually installing ZERO packages, and the
+      # build died at glib-sys/pkg-config ten minutes later. A release must
+      # fail loudly at the install step; the caching saved ~40s.
+      # libfuse2t64: linuxdeploy is itself an AppImage and needs FUSE2 to run;
+      # the ubuntu-24.04 images (20260714+) no longer ship it.
       - name: Install Linux dependencies
         if: matrix.os_name == 'linux'
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: >-
-            libwebkit2gtk-4.1-0
-            libwebkit2gtk-4.1-dev
-            libjavascriptcoregtk-4.1-0
-            libjavascriptcoregtk-4.1-dev
-            libsoup-3.0-0
-            libsoup-3.0-dev
-            libgtk-3-dev
-            libayatana-appindicator3-dev
-            librsvg2-dev
-            patchelf
-            xdg-utils
-            libfuse2
-          version: 1.0
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-0 \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-0 \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-0 \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            libfuse2t64
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -326,25 +423,45 @@ jobs:
           done
 
       - name: Build and upload via tauri-action
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Writes assets to the releases repo; the default GITHUB_TOKEN cannot
+          # write cross-repo, so RELEASES_TOKEN wins when configured.
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # Empty-set is CORRECT for passwordless keys (var_os → Some("")).
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy's bundled strip pass breaks against the ubuntu-24.04
+          # (20260714+) images' binutils ("failed to run linuxdeploy" even with
+          # FUSE installed). Harmless elsewhere; the shipped binary is already
+          # stripped by cargo's release profile.
+          NO_STRIP: 'true'
         with:
           projectPath: ${{ inputs.project_path }}
           tauriScript: pnpm tauri
+          # `--config` applies the per-OS bundle overlay; `extra_args` only
+          # renders for matrix entries that set it (undefined keys are empty).
           args: --target ${{ matrix.target }} --config ${{ matrix.config }} ${{ matrix.extra_args }}
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          # latest.json is assembled by create-updater-json below.
-          includeUpdaterJson: false
+          # The release id may live on the (public) releases repo, so point
+          # tauri-action at it explicitly — its API calls default to
+          # context.repo, where a cross-repo id does not exist.
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repo: ${{ needs.check-changelog.outputs.releases_name }}
+          # latest.json is assembled by create-updater-json below. NOTE: the
+          # input is `uploadUpdaterJson` on tauri-action v1 — the old
+          # `includeUpdaterJson` name is silently ignored (dead input) and lets
+          # tauri-action upload its own latest.json alongside ours.
+          uploadUpdaterJson: false
 
-      # Gatekeeper gate: when signing IS configured, fail unless the output is
-      # signed + notarized + stapled. No-op on unsigned builds.
+      # macOS Gatekeeper gate. tauri-action emits an UNSIGNED bundle (rather
+      # than failing) when signing secrets are absent, so a silently
+      # un-notarized release is otherwise possible. When signing IS configured,
+      # fail unless the output is signed + notarized + stapled.
       - name: Verify macOS signing + notarization
         if: matrix.os_name == 'darwin'
         env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
         run: |
           set -euo pipefail
@@ -364,28 +481,29 @@ jobs:
           echo "macOS signing + notarization verified."
 
   create-updater-json:
-    needs: [create-release, build-and-release]
+    needs: [check-changelog, create-release, build-and-release]
     runs-on: ubuntu-latest
     if: always() && needs.build-and-release.result == 'success'
     steps:
       - name: Generate updater JSON
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           VERSION: ${{ needs.create-release.outputs.version }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
+          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const version = process.env.VERSION;
             const channel = process.env.CHANNEL;
             const releaseId = Number(process.env.RELEASE_ID);
+            const owner = process.env.REL_OWNER;
+            const repo = process.env.REL_NAME;
 
-            const { data: release } = await github.rest.repos.getRelease({
-              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
-            });
-            const { data: assets } = await github.rest.repos.listReleaseAssets({
-              owner: context.repo.owner, repo: context.repo.repo, release_id: release.id,
-            });
+            const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
+            const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id });
 
             const platforms = {
               'darwin-aarch64': { signature: null, url: null },
@@ -415,8 +533,7 @@ jobs:
 
             const fetchSignatureBody = async (assetId) => {
               const sig = await github.rest.repos.getReleaseAsset({
-                owner: context.repo.owner, repo: context.repo.repo,
-                asset_id: assetId, headers: { accept: 'application/octet-stream' },
+                owner, repo, asset_id: assetId, headers: { accept: 'application/octet-stream' },
               });
               return Buffer.from(sig.data).toString('utf8');
             };
@@ -425,7 +542,7 @@ jobs:
             // asset.browser_download_url: on a draft release that URL contains
             // an `untagged-<hash>` path that 404s publicly and BREAKS after
             // the draft is published under its real tag.
-            const tagBase = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${version}/`;
+            const tagBase = `https://github.com/${owner}/${repo}/releases/download/${version}/`;
             for (const asset of assets) {
               for (const matcher of matchers) {
                 if (!matcher.test(asset.name)) continue;
@@ -449,8 +566,7 @@ jobs:
 
             const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
             await github.rest.repos.uploadReleaseAsset({
-              owner: context.repo.owner, repo: context.repo.repo,
-              release_id: release.id, name: manifestName,
+              owner, repo, release_id: release.id, name: manifestName,
               data: Buffer.from(JSON.stringify(updateManifest, null, 2), 'utf8'),
             });
             console.log(`Uploaded ${manifestName} for channel ${channel}`);
@@ -458,37 +574,38 @@ jobs:
   verify-release:
     # Fail loud BEFORE the draft flips public: catches missing signatures and
     # 404 download URLs before users see a broken update prompt.
-    needs: [create-release, build-and-release, create-updater-json]
+    needs: [check-changelog, create-release, build-and-release, create-updater-json]
     runs-on: ubuntu-latest
     if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
     steps:
       # Pre-publish verification must go through the API: draft-release assets
-      # are NOT downloadable via their public URLs (404 even authenticated on
-      # the browser path), so plain fetch/HEAD here always fails. URL
-      # correctness is guaranteed by construction (deterministic tag paths);
-      # public reachability is smoke-tested post-publish in publish-release.
+      # are NOT downloadable via their public URLs. URL correctness is
+      # guaranteed by construction (deterministic tag paths); public
+      # reachability is smoke-tested post-publish in publish-release.
       - name: Verify update manifest + assets (via API)
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           EXPECTED_VERSION: ${{ needs.create-release.outputs.version }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
+          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
             const channel = process.env.CHANNEL;
             const expectedVersion = process.env.EXPECTED_VERSION;
+            const owner = process.env.REL_OWNER;
+            const repo = process.env.REL_NAME;
             const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
 
-            const { data: release } = await github.rest.repos.getRelease({
-              owner: context.repo.owner, repo: context.repo.repo, release_id: releaseId,
-            });
+            const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
             const manifestAsset = release.assets.find((a) => a.name === manifestName);
             if (!manifestAsset) { core.setFailed(`Missing update manifest asset: ${manifestName}`); return; }
 
             const download = await github.rest.repos.getReleaseAsset({
-              owner: context.repo.owner, repo: context.repo.repo,
-              asset_id: manifestAsset.id, headers: { accept: 'application/octet-stream' },
+              owner, repo, asset_id: manifestAsset.id, headers: { accept: 'application/octet-stream' },
             });
             const manifest = JSON.parse(Buffer.from(download.data).toString('utf8'));
 
@@ -509,36 +626,38 @@ jobs:
             core.info(`Verified ${Object.keys(manifest.platforms).length} platforms in ${manifestName}.`);
 
   publish-release:
-    needs: [create-release, build-and-release, create-updater-json, verify-release]
+    needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release]
     runs-on: ubuntu-latest
     if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success'
     steps:
       - name: Publish release
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
+          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             await github.rest.repos.updateRelease({
-              owner: context.repo.owner, repo: context.repo.repo,
+              owner: process.env.REL_OWNER, repo: process.env.REL_NAME,
               release_id: Number(process.env.RELEASE_ID), draft: false,
             })
 
       # Post-publish smoke test: now that the release is public, the manifest
       # and every platform URL must resolve for an UNAUTHENTICATED client —
-      # exactly what end users' updaters are. NOTE: this can only pass on a
-      # PUBLIC repo; private-repo release assets 404 anonymously, which also
-      # means auto-update can never work from a private repo (host binaries in
-      # a public releases repo instead — see GOTCHAS.md).
+      # exactly what end users' updaters are. This can only pass when the
+      # releases repo is PUBLIC (see the header note).
       - name: Smoke-test public URLs
         env:
-          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           VERSION: ${{ needs.create-release.outputs.version }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         run: |
           set -euo pipefail
           MANIFEST_NAME=$([ "$CHANNEL" = "stable" ] && echo latest.json || echo "latest-${CHANNEL}.json")
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${MANIFEST_NAME}"
+          URL="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${VERSION}/${MANIFEST_NAME}"
           for attempt in 1 2 3; do
             CODE=$(curl -s -o /tmp/manifest.json -w '%{http_code}' -L -A release-verify "$URL") && [ "$CODE" = "200" ] && break
             sleep 10
@@ -557,17 +676,21 @@ jobs:
       # draft-only (404) asset URLs.
       - name: Mirror channel manifest to rolling release
         if: needs.create-release.outputs.channel != 'stable'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           APP_NAME: ${{ inputs.app_display_name }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
+          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
             const channel = process.env.CHANNEL;
             const appName = process.env.APP_NAME;
-            const { owner, repo } = context.repo;
+            const owner = process.env.REL_OWNER;
+            const repo = process.env.REL_NAME;
             const manifestName = `latest-${channel}.json`;
 
             const { data: versioned } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
@@ -597,6 +720,144 @@ jobs:
             });
             console.log(`Mirrored ${manifestName} to ${rollingTag}/latest.json`);
 
+  # Publish/refresh a Homebrew cask once the release is live. Stable releases
+  # own "<product_name>"; alpha/beta own channel-suffixed "<product_name>@alpha"
+  # / "@beta", so testers opt in explicitly and stable users are never offered
+  # a prerelease. Skips with a warning when homebrew_tap / product_name /
+  # HOMEBREW_TAP_TOKEN are not configured.
+  publish-homebrew-cask:
+    needs: [check-changelog, create-release, publish-release]
+    runs-on: ubuntu-latest
+    if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
+    steps:
+      - name: Check cask prerequisites
+        id: prereq
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          PRODUCT_NAME: ${{ inputs.product_name }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN secret missing — skipping Homebrew cask publish"
+            exit 0
+          fi
+          if [ -z "${PRODUCT_NAME:-}" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::product_name input not set — skipping Homebrew cask publish"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and push cask
+        if: steps.prereq.outputs.ready == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          APP_NAME: ${{ inputs.app_display_name }}
+          PRODUCT: ${{ inputs.product_name }}
+          TAP_REPO: ${{ inputs.homebrew_tap }}
+          CASK_DESC: ${{ inputs.cask_desc }}
+          CASK_HOMEPAGE: ${{ inputs.cask_homepage }}
+          BUNDLE_ID: ${{ inputs.bundle_identifier }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+        run: |
+          set -euo pipefail
+          BARE="${VERSION#v}"
+          BASE_URL="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${VERSION}"
+
+          # Hash the published macOS DMGs (public assets — no auth needed).
+          curl -fsSL -o arm64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_aarch64.dmg"
+          curl -fsSL -o x64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_x64.dmg"
+          SHA_ARM="$(sha256sum arm64.dmg | cut -d' ' -f1)"
+          SHA_X64="$(sha256sum x64.dmg | cut -d' ' -f1)"
+
+          if [ "$CHANNEL" = "stable" ]; then
+            CASK_TOKEN="${PRODUCT}"
+          else
+            CASK_TOKEN="${PRODUCT}@${CHANNEL}"
+          fi
+
+          # Optional stanzas rendered ahead of the heredoc.
+          ZAP_BLOCK=""
+          if [ -n "${BUNDLE_ID:-}" ]; then
+            ZAP_BLOCK="$(cat <<ZAP
+
+            zap trash: [
+              "~/Library/Application Support/${BUNDLE_ID}",
+              "~/Library/Caches/${BUNDLE_ID}",
+              "~/Library/Preferences/${BUNDLE_ID}.plist",
+              "~/Library/Saved Application State/${BUNDLE_ID}.savedState",
+              "~/Library/WebKit/${BUNDLE_ID}",
+            ]
+          ZAP
+          )"
+          fi
+          CAVEATS_BLOCK=""
+          if [ "$CHANNEL" != "stable" ]; then
+            CAVEATS_BLOCK="$(cat <<CAV
+
+            caveats <<~EOS
+              ${CHANNEL^} builds may not be notarized. If macOS refuses to open
+              the app, clear the quarantine flag:
+                xattr -dr com.apple.quarantine "/Applications/${PRODUCT}.app"
+            EOS
+          CAV
+          )"
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Casks
+
+          # Unquoted heredoc — ${...} is expanded by this shell; Ruby's
+          # #{version} interpolation passes through untouched. YAML's block
+          # scalar strips this script's base indentation, so the body lands
+          # flush-left in the cask file.
+          cat > "tap/Casks/${CASK_TOKEN}.rb" <<EOF
+          # This file is generated by the tauri-release-kit release workflow. DO NOT EDIT.
+          cask "${CASK_TOKEN}" do
+            version "${BARE}"
+
+            on_arm do
+              sha256 "${SHA_ARM}"
+              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_aarch64.dmg"
+            end
+            on_intel do
+              sha256 "${SHA_X64}"
+              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_x64.dmg"
+            end
+
+            name "${APP_NAME}"
+            desc "${CASK_DESC}"
+            homepage "${CASK_HOMEPAGE}"
+
+            livecheck do
+              skip "Updated by the release workflow."
+            end
+
+            # The app ships Tauri's built-in updater, so Homebrew must not
+            # downgrade it back to the cask version on \`brew upgrade\`.
+            auto_updates true
+            depends_on macos: ">= :ventura"
+
+            app "${PRODUCT}.app"${ZAP_BLOCK}${CAVEATS_BLOCK}
+          end
+          EOF
+
+          cd tap
+          git config user.name "release-kit-bot"
+          git config user.email "releases@users.noreply.github.com"
+          git add "Casks/${CASK_TOKEN}.rb"
+          if git diff --cached --quiet; then
+            echo "Cask unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "${PRODUCT}: update ${CASK_TOKEN} to ${BARE}"
+          git push origin HEAD
+          echo "Published ${CASK_TOKEN} ${BARE} to ${TAP_REPO}"
+
   # Post-release patch bump PR (stable releases only). Default GITHUB_TOKEN
   # pushes don't trigger workflows — re-run CI on the PR manually if needed.
   bump-version:
@@ -612,7 +873,7 @@ jobs:
       PROJECT_PATH: ${{ inputs.project_path }}
       CARGO_PACKAGE: ${{ inputs.cargo_package }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.repository.default_branch }}
