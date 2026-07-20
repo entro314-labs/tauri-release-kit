@@ -158,3 +158,20 @@ re-read this first.
 - **oxfmt ≥0.59 exits non-zero when every matched file is ignore-listed** —
   gates that "format then diff" a deliberately formatter-ignored file now fail
   before the diff runs.
+- **Target-only Rust code first compiles at release time** (anasa
+  v0.2.0-alpha.3, four tag recycles): `#[cfg(target_os = "…")]` modules are
+  invisible to every dev-machine check on another OS, so a feature-gated dep
+  (`ashpd` without its `settings` feature) and a moved API
+  (`windows::Foundation::IAsyncOperation` → `windows-future`, `.get()` →
+  `.join()`) only surfaced in the per-leg clippy gates. Cheap local preflight:
+  `rustup target add <triple>` + a scratch crate with just the target-gated
+  dep + module compiles the exact CI errors on any host (full `cargo check
+  --target` dies on C build scripts like ring). And once the target code
+  *compiles*, let a doomed run reach that leg's clippy step — it reports the
+  complete lint list in one shot.
+- **Doc lints only fire when the cfg'd module actually compiles**:
+  `clippy::doc_markdown` errors (`-D warnings` + pedantic) in Windows-only
+  files passed silently everywhere until the Windows leg first compiled them.
+  Compile errors abort clippy before its lint phase, so a leg can fail twice
+  in a row with *different* error classes: first rustc errors, then, once
+  those are fixed, lint errors the same run never got to report.

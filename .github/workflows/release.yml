@@ -219,6 +219,25 @@ jobs:
           fi
           echo "Found CHANGELOG entry for ${VERSION}."
 
+  # Formatting is target-independent, so one cheap ubuntu runner settles it for
+  # all six legs before the matrix spins up (anasa v0.2.0-alpha.3 burned six
+  # runners on an import-order diff that each leg's own fmt step then caught).
+  # Runs in parallel with check-changelog; needs no system deps or node_modules
+  # — rustup still honors the repo's pinned rust-toolchain.toml.
+  rust-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rust format check
+        working-directory: ${{ inputs.project_path }}/src-tauri
+        run: cargo fmt --all -- --check
+
   create-release:
     needs: check-changelog
     runs-on: ubuntu-latest
@@ -269,7 +288,7 @@ jobs:
             return data.id
 
   build-and-release:
-    needs: [check-changelog, create-release]
+    needs: [check-changelog, create-release, rust-fmt]
     strategy:
       fail-fast: false
       matrix:
