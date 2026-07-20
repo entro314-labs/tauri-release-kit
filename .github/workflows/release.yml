@@ -898,7 +898,9 @@ jobs:
             # The app ships Tauri's built-in updater, so Homebrew must not
             # downgrade it back to the cask version on \`brew upgrade\`.
             auto_updates true
-            depends_on macos: ">= :ventura"
+            # Bare symbol = "this version or newer"; the string comparison form
+            # (">= :ventura") is deprecated in Homebrew 4.x and warns on install.
+            depends_on macos: :ventura
 
             app "${PRODUCT}.app"${ZAP_BLOCK}${CAVEATS_BLOCK}
           end
