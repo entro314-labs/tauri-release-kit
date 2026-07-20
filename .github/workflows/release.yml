@@ -78,7 +78,7 @@ on:
       homebrew_tap:
         description: >-
           'owner/name' of a Homebrew tap repo to publish a macOS cask to
-          (stable → "<product_name>", prerelease → "<product_name>@<channel>").
+          (stable → "<cask token>", prerelease → "<cask token>@<channel>").
           Empty = skip cask publishing. Requires product_name + the
           HOMEBREW_TAP_TOKEN secret (skips with a warning when absent).
         required: false
@@ -98,6 +98,16 @@ on:
         description: >-
           tauri.conf.json identifier (e.g. com.example.app). When set, the cask
           gets a `zap trash:` block for the standard ~/Library paths.
+        required: false
+        type: string
+        default: ''
+      rust_workspace_dir:
+        description: >-
+          Directory containing the cargo workspace root (Cargo.lock + target/).
+          Defaults to '<project_path>/src-tauri' (src-tauri is its own
+          workspace). Set to '.' for repo-root workspaces where src-tauri is a
+          member — the post-release bump also falls back to the repo-root
+          Cargo.lock automatically.
         required: false
         type: string
         default: ''
@@ -134,6 +144,12 @@ on:
       APPLE_PASSWORD:
         required: false
       APPLE_TEAM_ID:
+        required: false
+      SENTRY_DSN:
+        description: 'Optional: baked into release builds as SENTRY_DSN + VITE_SENTRY_DSN (non-empty only)'
+        required: false
+      SENTRY_AUTH_TOKEN:
+        description: 'Optional: exported to the build for sourcemap/symbol upload tooling (non-empty only)'
         required: false
 
 jobs:
@@ -337,7 +353,7 @@ jobs:
       - name: Cache Rust workspace
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ inputs.project_path }}/src-tauri
+          workspaces: ${{ inputs.rust_workspace_dir != '' && inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}
           shared-key: ${{ matrix.target }}
           cache-on-failure: true
 
@@ -421,6 +437,26 @@ jobs:
               echo "${name}=${!name}" >> "$GITHUB_ENV"
             fi
           done
+
+      # Optional telemetry wiring: apps that report to Sentry set the
+      # SENTRY_DSN / SENTRY_AUTH_TOKEN secrets and read the env at build time
+      # (VITE_SENTRY_DSN for the frontend bundle). Non-empty-only for the same
+      # reason as the Apple step — an empty-but-set DSN is not "unset" to the
+      # consuming SDKs. No-op for apps without the secrets.
+      - name: Export Sentry env (non-empty only)
+        shell: bash
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SENTRY_DSN:-}" ]; then
+            echo "SENTRY_DSN=${SENTRY_DSN}" >> "$GITHUB_ENV"
+            echo "VITE_SENTRY_DSN=${SENTRY_DSN}" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${SENTRY_AUTH_TOKEN:-}" ]; then
+            echo "SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN}" >> "$GITHUB_ENV"
+          fi
 
       - name: Build and upload via tauri-action
         uses: tauri-apps/tauri-action@v1
@@ -773,10 +809,13 @@ jobs:
           SHA_ARM="$(sha256sum arm64.dmg | cut -d' ' -f1)"
           SHA_X64="$(sha256sum x64.dmg | cut -d' ' -f1)"
 
+          # Cask tokens are lowercase by Homebrew convention; PRODUCT keeps its
+          # original case for asset URLs (the DMG filename stem is case-sensitive).
+          TOKEN_BASE="$(printf '%s' "$PRODUCT" | tr '[:upper:]' '[:lower:]')"
           if [ "$CHANNEL" = "stable" ]; then
-            CASK_TOKEN="${PRODUCT}"
+            CASK_TOKEN="${TOKEN_BASE}"
           else
-            CASK_TOKEN="${PRODUCT}@${CHANNEL}"
+            CASK_TOKEN="${TOKEN_BASE}@${CHANNEL}"
           fi
 
           # Optional stanzas rendered ahead of the heredoc.
@@ -941,7 +980,11 @@ jobs:
               new_text, n = re.subn(r'(?m)^version\s*=\s*"' + re.escape(released) + r'"', f'version = "{new}"', text, count=1)
               if n: cargo_toml.write_text(new_text); print("updated Cargo.toml")
 
+          # src-tauri owns the lock when it is its own workspace root (anasa);
+          # repo-root workspaces (astrolabe) keep the lock at the repo root.
           cargo_lock = proj / "src-tauri" / "Cargo.lock"
+          if not cargo_lock.exists():
+              cargo_lock = Path("Cargo.lock")
           if cargo_lock.exists():
               text = cargo_lock.read_text()
               pat = re.compile(r'(\[\[package\]\]\nname = "' + re.escape(pkg) + r'"\nversion = ")[^"]+(")')

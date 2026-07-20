@@ -20,6 +20,28 @@ on:
         required: false
         type: boolean
         default: false
+      rust_workspace_dir:
+        description: >-
+          Directory containing the cargo workspace root (Cargo.lock + target/).
+          Defaults to '<project_path>/src-tauri' (src-tauri is its own
+          workspace). Set to '.' for repo-root workspaces where src-tauri is a
+          member.
+        required: false
+        type: string
+        default: ''
+      clippy_args:
+        description: >-
+          Extra args for `cargo clippy` (before `-- -D warnings`), e.g.
+          '--workspace --all-targets --all-features' for multi-crate workspaces
+          with a stricter gate.
+        required: false
+        type: string
+        default: ''
+      test_args:
+        description: "Extra args for `cargo test`, e.g. '--workspace'."
+        required: false
+        type: string
+        default: ''
       node_version:
         required: false
         type: string
@@ -52,7 +74,7 @@ jobs:
       - name: Cache Rust workspace
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ inputs.project_path }}/src-tauri
+          workspaces: ${{ inputs.rust_workspace_dir != '' && inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}
           shared-key: checks-${{ matrix.os }}
           cache-on-failure: true
 
@@ -80,9 +102,15 @@ jobs:
 
       - name: Rust clippy check
         working-directory: ${{ inputs.project_path }}/src-tauri
-        run: cargo clippy -- -D warnings
+        shell: bash
+        env:
+          CLIPPY_ARGS: ${{ inputs.clippy_args }}
+        run: cargo clippy ${CLIPPY_ARGS:-} -- -D warnings
 
       - name: Rust tests
         if: inputs.run_tests
         working-directory: ${{ inputs.project_path }}/src-tauri
-        run: cargo test
+        shell: bash
+        env:
+          TEST_ARGS: ${{ inputs.test_args }}
+        run: cargo test ${TEST_ARGS:-}
