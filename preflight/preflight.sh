@@ -83,8 +83,12 @@ need_docker() {
   docker info >/dev/null 2>&1 || { echo "docker daemon not running" >&2; return 1; }
 }
 
+# $1 = docker platform. Images are per-arch (a host-arch-only tag made the
+# other platform's run die at image resolution).
 build_linux_image() {
-  docker build -q -f "$KIT_DIR/Dockerfile.linux" -t "$LINUX_IMAGE" "$KIT_DIR" >/dev/null
+  local platform="$1" arch="${1#linux/}"
+  docker build -q --platform "$platform" -f "$KIT_DIR/Dockerfile.linux" \
+    -t "${LINUX_IMAGE}-${arch}" "$KIT_DIR" >/dev/null
 }
 
 # ---- stages -----------------------------------------------------------------
@@ -95,6 +99,13 @@ stage_fmt() {
 
 stage_mac() {
   rustup target add x86_64-apple-darwin >/dev/null 2>&1 || true
+  # openssl-sys (git2 et al) can't resolve OpenSSL via pkg-config for the
+  # non-host apple arch; point it at brew's copy — headers are arch-independent
+  # and clippy never links, so one install serves both targets.
+  if [ -z "${OPENSSL_DIR:-}" ] && command -v brew >/dev/null 2>&1; then
+    OPENSSL_DIR="$(brew --prefix openssl@3 2>/dev/null || brew --prefix openssl 2>/dev/null || true)"
+    [ -n "$OPENSSL_DIR" ] && export OPENSSL_DIR
+  fi
   (cd "$PF_REPO/$TAURI_DIR" \
     && cargo clippy --target aarch64-apple-darwin -- -D warnings \
     && cargo clippy --target x86_64-apple-darwin -- -D warnings)
@@ -103,14 +114,14 @@ stage_mac() {
 # $1 = docker platform (linux/arm64|linux/amd64), $2 = rust triple
 stage_linux_clippy() {
   local platform="$1" triple="$2" arch="${1#linux/}"
-  need_docker && build_linux_image
+  need_docker && build_linux_image "$platform"
   docker run --rm --platform "$platform" \
     -v "$PF_REPO":/src \
     -v "${PF_NAME}-pf-rustup-${arch}":/cache/rustup \
     -v "${PF_NAME}-pf-cargo-${arch}":/cache/cargo \
     -v "${PF_NAME}-pf-target-linux-${arch}":/cache/target \
     -w "/src/$TAURI_DIR" \
-    "$LINUX_IMAGE" bash -ceu '
+    "${LINUX_IMAGE}-${arch}" bash -ceu '
       command -v rustup >/dev/null 2>&1 || curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain none --no-modify-path >/dev/null
       cargo clippy --target '"$triple"' -- -D warnings
@@ -125,6 +136,8 @@ stage_windows_clippy() {
   docker run --rm \
     -v "$PF_REPO":/src \
     -e RUSTUP_HOME=/cache/rustup \
+    -e CC_aarch64_pc_windows_msvc=clang-cl \
+    -e CXX_aarch64_pc_windows_msvc=clang-cl \
     -v "${PF_NAME}-pf-xwin-rustup":/cache/rustup \
     -v "${PF_NAME}-pf-xwin-registry":/usr/local/cargo/registry \
     -v "${PF_NAME}-pf-xwin-cache":/root/.cache/cargo-xwin \
@@ -146,7 +159,7 @@ stage_windows_clippy() {
 # pnpm install / tauri build write node_modules and dist into the tree, which
 # must never leak Linux artifacts onto the host checkout.
 stage_linux_bundle() {
-  need_docker && build_linux_image
+  need_docker && build_linux_image linux/arm64
   if ! git -C "$PF_REPO" diff --quiet HEAD 2>/dev/null; then
     echo "note: linux-bundle builds HEAD from a clean clone — uncommitted changes are NOT included"
   fi
@@ -157,7 +170,7 @@ stage_linux_bundle() {
     -v "${PF_NAME}-pf-bundle-target":/cache/target \
     -e NO_STRIP=true \
     -e PF_PROJECT_PATH="$PF_PROJECT_PATH" \
-    "$LINUX_IMAGE" bash -ceu '
+    "${LINUX_IMAGE}-arm64" bash -ceu '
       command -v rustup >/dev/null 2>&1 || curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain none --no-modify-path >/dev/null
       git clone -q file:///host-src /work && cd /work
