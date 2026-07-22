@@ -130,14 +130,17 @@ stage_linux_clippy() {
 
 # $1 = rust windows triple. cargo-xwin cross-compiles MSVC targets from Linux;
 # compile+lint parity with the CI clippy gate (bundling stays CI-only).
+# aarch64 uses the GNU clang driver: the default clang-cl path feeds MSVC-style
+# /imsvc include flags into the plain-clang invocation cc-rs uses for ring's
+# .S assembly, which the GNU driver rejects as a file path.
 stage_windows_clippy() {
-  local triple="$1"
+  local triple="$1" xwin_cc="clang-cl"
+  [ "$triple" = "aarch64-pc-windows-msvc" ] && xwin_cc="clang"
   need_docker
   docker run --rm \
     -v "$PF_REPO":/src \
     -e RUSTUP_HOME=/cache/rustup \
-    -e CC_aarch64_pc_windows_msvc=clang-cl \
-    -e CXX_aarch64_pc_windows_msvc=clang-cl \
+    -e XWIN_CROSS_COMPILER="$xwin_cc" \
     -v "${PF_NAME}-pf-xwin-rustup":/cache/rustup \
     -v "${PF_NAME}-pf-xwin-registry":/usr/local/cargo/registry \
     -v "${PF_NAME}-pf-xwin-cache":/root/.cache/cargo-xwin \
