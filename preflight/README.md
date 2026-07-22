@@ -8,26 +8,29 @@ breaks (feature-gated deps, windows-crate API moves, doc lints inside
 | Release leg        | Preflight stage  | How                                        |
 | ------------------ | ---------------- | ------------------------------------------ |
 | macos aarch64/x64  | `mac`            | native clippy, both apple targets          |
-| linux x64/arm64    | `linux-*`        | docker ubuntu:24.04, same apt set as CI    |
+| linux arm64        | `linux-arm64`    | docker ubuntu:24.04, same apt set as CI    |
+| linux x64          | `linux-amd64`    | opt-in via `--only` — see note below       |
 | windows x64        | `windows-x64`    | docker cargo-xwin (clang-cl + MSVC SDK)    |
 | windows arm64      | `windows-arm64`  | opt-in via `--only` — see note below       |
 | linux full bundle  | `linux-bundle`   | `--full` only; clean clone of HEAD         |
+
+The default set (fmt + mac + linux-arm64 + windows-x64) compiles every
+first-party `#[cfg]` path — a doc lint or feature-gate break in your own code
+cannot hide from it. The opt-in second-arch twins only add coverage of
+arch-specific code in third-party crates, which CI's native legs still gate:
+
+- `linux-amd64` needs working Rosetta-in-Docker on Apple Silicon; under the
+  qemu fallback rustc segfaults (observed on macOS 27 beta + Docker 29 even
+  with VZ + Rosetta enabled in Docker settings). Fine on x86 hosts.
+- `windows-arm64` is blocked upstream in cargo-xwin: clang-cl leaks
+  MSVC-style `/imsvc` flags into the GNU-clang call cc-rs uses for ring's
+  `.S` assembly, and the GNU driver can't resolve the lowercased xwin SDK's
+  `Windows.h` on a case-sensitive filesystem.
 
 Not covered (still CI-only): NSIS/MSI bundling, macOS signing/notarization,
 Windows linking (clippy stops before link), and anything runner-image
 specific — treat a green preflight as "the compile/lint gates will pass",
 not "the release will succeed".
-
-`windows-arm64` is excluded from the default set: cargo-xwin currently can't
-cross-compile ring for aarch64-msvc either way (clang-cl leaks MSVC-style
-`/imsvc` flags into the GNU-clang call cc-rs uses for `.S` assembly; the GNU
-driver can't resolve the lowercased xwin SDK's `Windows.h` on a
-case-sensitive filesystem). First-party lint coverage is identical to
-`windows-x64`; CI's native arm64 leg remains the real gate.
-
-Requirements on Apple Silicon: Docker Desktop with **Rosetta enabled**
-(Settings → General → "Use Rosetta for x86/amd64 emulation") — under plain
-QEMU, rustc segfaults in the linux-amd64 stage.
 
 ## Consuming from an app repo
 

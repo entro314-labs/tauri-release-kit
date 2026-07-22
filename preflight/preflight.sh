@@ -54,20 +54,25 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# windows-arm64 is NOT in the default set: local cross-clippy for it is blocked
-# upstream in cargo-xwin (clang-cl feeds MSVC /imsvc flags into the GNU-clang
-# invocation ring's .S asm needs; the GNU driver in turn can't resolve the
-# case-sensitive lowercased xwin SDK headers, e.g. Windows.h). windows-x64
-# covers the full lint surface of first-party code — the arch delta is in
-# third-party crates the CI leg still gates. Run it explicitly via --only.
+# Default stages give COMPLETE first-party lint coverage: every #[cfg] path
+# compiles in mac (both arches), linux-arm64, and windows-x64. The second-arch
+# twins are opt-in via --only because their extra coverage is third-party-only
+# (arch-specific code in deps, which CI's native legs still gate) and each has
+# a host requirement that doesn't hold everywhere:
+#   linux-amd64   — needs working Rosetta-in-Docker; under qemu fallback rustc
+#                   SIGSEGVs (observed on macOS 27 beta + Docker 29 even with
+#                   VZ+Rosetta enabled in settings)
+#   windows-arm64 — blocked upstream in cargo-xwin: clang-cl leaks /imsvc into
+#                   the GNU-clang call ring's .S asm needs; the GNU driver
+#                   can't resolve the lowercased SDK's Windows.h
 stages() {
   if [ -n "$ONLY" ]; then printf '%s' "$ONLY" | tr ',' ' '; return; fi
   local mac=""
   [ "$(uname -s)" = "Darwin" ] && mac="mac"
   case "$MODE" in
     fast) echo "fmt $mac" ;;
-    full) echo "fmt $mac linux-arm64 linux-amd64 windows-x64 linux-bundle" ;;
-    *)    echo "fmt $mac linux-arm64 linux-amd64 windows-x64" ;;
+    full) echo "fmt $mac linux-arm64 windows-x64 linux-bundle" ;;
+    *)    echo "fmt $mac linux-arm64 windows-x64" ;;
   esac
 }
 
