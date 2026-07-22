@@ -34,6 +34,9 @@ app picks them up. Pin `@main` for latest or a tag for stability.
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
    - `scripts/version-manager.ts` → `tooling/scripts/` (or anywhere; run via `tsx`)
+   - the preflight wrapper from [`preflight/README.md`](preflight/README.md)
+     → `tooling/preflight/preflight.sh` + a `"preflight"` package.json script
+     (runs the matrix's fmt/clippy gates locally before a tag push)
 
 2. **Tauri config requirements** (`src-tauri/tauri.conf.json`):
    - `bundle.createUpdaterArtifacts: true`
@@ -96,6 +99,12 @@ attempt); calendar the renewal.
 
 macOS runners bill at 10× on private repos and dominate release cost. The
 gates (fmt/clippy) run before any expensive build so a lint failure costs
-minutes, not builds. Verify Linux gates locally before tagging — see the
-Docker recipe in [docs/GOTCHAS.md](docs/GOTCHAS.md) — because each failed
-release attempt costs a tag-recycle and CI minutes.
+minutes, not builds — and the standalone `rust-fmt` job settles formatting on
+one ubuntu runner before the matrix spins at all.
+
+**Run [`preflight/`](preflight/README.md) before every tag push.** It runs
+the same fmt/clippy gates locally: native for both mac targets, docker
+ubuntu:24.04 for both Linux targets, and docker cargo-xwin for both Windows
+MSVC targets — the exact three environments whose target-only breaks have
+recycled real release tags. A failed release attempt costs a tag-recycle and
+a 6-leg matrix; a failed preflight stage costs local compute.

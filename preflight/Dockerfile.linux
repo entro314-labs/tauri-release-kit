@@ -1,0 +1,32 @@
+# Preflight image for the Linux release legs: the exact apt set the
+# tauri-release-kit build legs install on ubuntu-24.04 (plus libssl-dev/perl/
+# make, which the GitHub runner image preinstalls but a bare container lacks —
+# learned on the alpha.2 docker probe). Rust is deliberately NOT baked in:
+# rustup lives in a named volume and resolves the repo's pinned
+# rust-toolchain.toml at run time, so this image never goes stale on a
+# toolchain bump. Node/pnpm are included only for `--full` bundle runs.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl ca-certificates git pkg-config file \
+    libwebkit2gtk-4.1-0 libwebkit2gtk-4.1-dev \
+    libjavascriptcoregtk-4.1-0 libjavascriptcoregtk-4.1-dev \
+    libsoup-3.0-0 libsoup-3.0-dev \
+    libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+    libssl-dev perl make patchelf xdg-utils libfuse2t64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 24 + corepack/pnpm for --full bundle runs (idle weight for clippy runs).
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && corepack enable \
+    && rm -rf /var/lib/apt/lists/*
+
+# rustup/cargo state lives in named volumes mounted here (see preflight.sh);
+# first run installs the pinned toolchain into the volume, later runs reuse it.
+ENV RUSTUP_HOME=/cache/rustup \
+    CARGO_HOME=/cache/cargo \
+    CARGO_TARGET_DIR=/cache/target \
+    PATH=/cache/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
