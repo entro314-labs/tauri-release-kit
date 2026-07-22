@@ -1,6 +1,6 @@
 [toolchain]
 # Pin >= the `rust-version` (MSRV) in src-tauri/Cargo.toml.
-channel = "1.97.0"
+channel = "1.97.1"
 # REQUIRED: CI runs `cargo fmt --check` and `cargo clippy -D warnings` under
 # this pinned toolchain; without these, rustup auto-installs it with the
 # runner's minimal profile and both gate steps fail on every platform.
