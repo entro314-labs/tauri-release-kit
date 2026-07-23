@@ -259,6 +259,35 @@ jobs:
             echo "CHANNEL=stable" >> $GITHUB_OUTPUT
           fi
 
+      - uses: actions/checkout@v7
+
+      # The release body IS the tag's CHANGELOG section: it becomes the notes
+      # users see on the release page AND — via create-updater-json's `notes`
+      # field — the `update.body` the in-app updater shows BEFORE install.
+      # A placeholder here means every consumer shows a useless changelog.
+      - name: Extract changelog section for release body
+        id: notes
+        env:
+          VERSION: ${{ needs.check-changelog.outputs.version }}
+        run: |
+          BARE="${VERSION#v}"
+          BODY_FILE="$RUNNER_TEMP/release-notes.md"
+          if [ -f CHANGELOG.md ]; then
+            # Section = lines after `## [X.Y.Z...]` up to the next `## [` heading.
+            awk -v ver="$BARE" '
+              /^## \[/ {
+                if (found) exit
+                if (index($0, "[" ver "]") > 0) { found=1; next }
+              }
+              found { print }
+            ' CHANGELOG.md | sed -e '/./,$!d' > "$BODY_FILE"
+          fi
+          if [ ! -s "${BODY_FILE:-/dev/null}" ]; then
+            echo "No CHANGELOG section found for $BARE — using fallback body" >&2
+            printf 'See the changelog in the repository for details on this release.\n' > "$BODY_FILE"
+          fi
+          echo "file=$BODY_FILE" >> "$GITHUB_OUTPUT"
+
       # The draft is created on the releases repo (which may be a public
       # mirror — see the header note on private repos). On publish, GitHub
       # creates the tag on that repo's default branch.
@@ -271,17 +300,20 @@ jobs:
           APP_NAME: ${{ inputs.app_display_name }}
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          NOTES_FILE: ${{ steps.notes.outputs.file }}
         with:
           # Default GITHUB_TOKEN cannot write to another repo.
           github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME } = process.env;
+            const { readFileSync } = require('node:fs');
+            const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME, NOTES_FILE } = process.env;
+            const body = readFileSync(NOTES_FILE, 'utf8').trim();
             const { data } = await github.rest.repos.createRelease({
               owner: REL_OWNER,
               repo: REL_NAME,
               tag_name: VERSION,
               name: `${APP_NAME} ${VERSION}`,
-              body: 'Take a look at the assets to download and install this version.',
+              body,
               draft: true,
               prerelease: CHANNEL !== 'stable',
             })
@@ -560,13 +592,16 @@ jobs:
             const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
             const { data: assets } = await github.rest.repos.listReleaseAssets({ owner, repo, release_id: release.id });
 
+            // `size` (bytes) is a kit extension the Tauri plugin ignores;
+            // apps read it from the manifest to show download size BEFORE the
+            // user commits to an update.
             const platforms = {
-              'darwin-aarch64': { signature: null, url: null },
-              'darwin-x86_64': { signature: null, url: null },
-              'windows-x86_64': { signature: null, url: null },
-              'windows-aarch64': { signature: null, url: null },
-              'linux-x86_64': { signature: null, url: null },
-              'linux-aarch64': { signature: null, url: null },
+              'darwin-aarch64': { signature: null, url: null, size: null },
+              'darwin-x86_64': { signature: null, url: null, size: null },
+              'windows-x86_64': { signature: null, url: null, size: null },
+              'windows-aarch64': { signature: null, url: null, size: null },
+              'linux-x86_64': { signature: null, url: null, size: null },
+              'linux-aarch64': { signature: null, url: null, size: null },
             };
 
             // First-match-wins predicates over asset filenames. Windows uses
@@ -603,6 +638,7 @@ jobs:
                 if (!matcher.test(asset.name)) continue;
                 if (matcher.kind === 'url') {
                   platforms[matcher.key].url = tagBase + encodeURIComponent(asset.name);
+                  platforms[matcher.key].size = asset.size;
                 } else {
                   platforms[matcher.key].signature = await fetchSignatureBody(asset.id);
                 }
