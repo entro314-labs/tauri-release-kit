@@ -18,7 +18,34 @@ framework-light port ships in the `tauri-scaf` template.
   NSOpenPanel breakage, Tauri #13047). Download + signature-verify into
   managed state (`PendingUpdate`); `Update::install` runs from the
   `RunEvent::ExitRequested` handler. Restart is a *separate, user-chosen*
-  action (`relaunch()`).
+  action.
+- **Explicit restart = install-then-restart (`restart_and_install`).** The
+  "Restart to Update" button must not just `relaunch()` and lean on the
+  exit-path installer: that path is best-effort (the app is dying; a failed
+  install can only be logged) so the user relaunches into the *old* version
+  believing they updated. Instead a dedicated command installs the staged
+  bundle first — consuming the staged entry only on success, so a failure
+  surfaces to the UI with the bundle still staged for retry — and restarts
+  only after a successful install. The millisecond live-bundle window this
+  opens right before the restart is the deliberate trade for error
+  visibility; the quit path stays zero-window best-effort.
+- **Classify "dead pipeline" vs "no release yet".** The updater plugin
+  flattens "the releases repository is missing/private/renamed" and "this
+  channel has no published release yet" into one `ReleaseNotFound` error
+  ("Could not fetch a valid release JSON"), so a permanently broken update
+  pipeline reads to every user, forever, as the calm pre-first-release
+  state. On that error, probe the releases repository itself —
+  `<repo>/releases.atom` is the cheapest endpoint that exists for every
+  public repo, 2xx when live, 404 when missing/private/renamed — and
+  surface a distinct, retryable "update source unreachable" error when the
+  repo does not answer. Only a probe-confirmed live repo may render the
+  calm no-releases state. (Found the hard way: meltemi audit 2026-07-30 H5;
+  anasa `check_channel` in `commands/update.rs`.)
+- **Pin the endpoint contract with unit tests.** The channel endpoints are
+  the app↔kit contract; two cheap tests keep them honest: every endpoint
+  starts with the releases-repo URL the reachability probe interrogates
+  (repointing one without the other mislabels a broken pipeline as calm
+  again), and each channel matches the kit's manifest convention below.
 - **Runtime per-channel endpoints** (`updater_builder().endpoints(...)`) —
   stable / beta / alpha resolve to the kit's rolling manifests:
   stable → `releases/latest/download/latest.json`,
@@ -77,9 +104,12 @@ framework-light port ships in the `tauri-scaf` template.
    - staged → "installs when you quit — or restart now" + **Restart to
      Update** (the two-phase pattern: download when convenient, restart when
      *the user* chooses)
-   - error → friendly taxonomy (network / not-found / signature / disk) with
-     **Retry** where retrying makes sense; a signature failure is
-     deliberately not retryable-styled and says the download was discarded
+   - error → friendly taxonomy (unreachable / network / not-found /
+     signature / disk) with **Retry** where retrying makes sense; a
+     signature failure is deliberately not retryable-styled and says the
+     download was discarded; "update source unreachable" gets its own copy
+     ("the update service didn't respond") — never the calm no-releases
+     notice, never the generic network copy
    - managed install → package-manager notice instead of the checker
    - `aria-live="polite"` on state regions; no live region on the raw
      percent ticker (announcing every tick is hostile).

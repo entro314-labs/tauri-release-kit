@@ -108,3 +108,28 @@ ubuntu:24.04 for both Linux targets, and docker cargo-xwin for both Windows
 MSVC targets — the exact three environments whose target-only breaks have
 recycled real release tags. A failed release attempt costs a tag-recycle and
 a 6-leg matrix; a failed preflight stage costs local compute.
+
+### Self-hosted runners (consumer repos, since 2026-08-06)
+
+anasa and meltemi no longer pay for their per-push test matrix. Both have
+self-hosted runners on the fleet (full map: `devops-dots/NETWORK.md`):
+
+| leg | on push | on PR into main / tag |
+|---|---|---|
+| Linux x64 | `cachy-beastie`, native — free | same |
+| macOS arm64 | `macbook`, native — free | same |
+| Windows x64 build | `cachy-beastie`, **cross-compiled** — free | `windows-latest`, native (2×) |
+| Windows unit tests | not run (they execute; no cross-compiling) | `windows-latest` (2×) |
+
+Their `test.yml` selects legs by **runner label**, so GitHub-image-specific
+steps (`apt-get`, the `sudo rm -rf` disk-freeing step) stay keyed to
+`ubuntu-latest` and correctly no-op on self-hosted hardware. Anything meant to
+run *once* is keyed to the leg (`matrix.platform.name == 'Linux'`) rather than
+to `ubuntu-latest`, or it would silently stop running altogether.
+
+This kit's own `release.yml` still uses GitHub-hosted runners for all six legs.
+Tag-time releases are rare and want pristine, reproducible environments — and
+the `windows-11-arm` leg has no self-hosted equivalent, since Windows-on-ARM
+cannot be cross-compiled (cargo-xwin leaks MSVC `/imsvc` flags into the
+GNU-clang driver `cc-rs` uses for `ring`). Point release builds at self-hosted
+runners only if you accept a less reproducible release environment.
