@@ -13,6 +13,15 @@ on:
         description: 'Tag to release (e.g. v1.0.0, v1.0.0-alpha.1)'
         required: true
         type: string
+      build_targets:
+        description: >-
+          Only build these legs (comma-separated updater keys, e.g.
+          "windows-aarch64,linux-x86_64"). Empty = all. Retry lever: after a
+          partially failed release, re-dispatch with the SAME tag and just the
+          failed legs — successful legs' assets are already on the draft.
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: release-${{ github.ref }}
@@ -29,6 +38,11 @@ jobs:
       project_path: 'apps/desktop'     # ← '.' for single-app repos
       cargo_package: 'myapp'           # ← [[package]] name in Cargo.lock
       tag: ${{ inputs.tag || '' }}
+      build_targets: ${{ inputs.build_targets || '' }}
+      # --- Shipped platform set (optional). Default = all six legs; list
+      #     fewer to skip legs you don't ship — each dropped macOS leg saves
+      #     10×-billed minutes on every release.
+      # targets: 'darwin-aarch64,darwin-x86_64,windows-x86_64,linux-x86_64,linux-aarch64'
       # --- Cross-repo publishing (REQUIRED for private app repos: private
       #     release assets 404 anonymously, breaking downloads + auto-update).
       #     Needs the RELEASES_TOKEN secret (fine-grained PAT, Contents:RW on

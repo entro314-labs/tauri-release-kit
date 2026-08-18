@@ -28,6 +28,13 @@
 # PRIVATE app repos MUST set `releases_repo` to a PUBLIC repo + provide
 # RELEASES_TOKEN: private-repo release assets 404 for unauthenticated users,
 # which silently breaks both downloads and the auto-updater.
+#
+# RESUMABLE: a run for a tag that already has a DRAFT release reuses that
+# draft, so a partially failed release is retried via workflow_dispatch with
+# `build_targets` set to just the failed legs — assets from successful legs
+# are kept, and only the failed legs' runner minutes are spent again (macOS
+# legs bill 10× on private repos; this is the kit's main cost lever). The
+# `targets` input independently lets an app ship fewer than six platforms.
 
 name: Release (reusable)
 
@@ -108,6 +115,28 @@ on:
           workspace). Set to '.' for repo-root workspaces where src-tauri is a
           member — the post-release bump also falls back to the repo-root
           Cargo.lock automatically.
+        required: false
+        type: string
+        default: ''
+      targets:
+        description: >-
+          Comma-separated platform set the app SHIPS, as updater-manifest keys
+          (subset of: darwin-aarch64, darwin-x86_64, windows-x86_64,
+          windows-aarch64, linux-x86_64, linux-aarch64). Drives the build
+          matrix, the updater manifest, release verification, and the cask
+          arch blocks — an app only pays for the legs it ships. Default: all
+          six.
+        required: false
+        type: string
+        default: 'darwin-aarch64,darwin-x86_64,windows-x86_64,windows-aarch64,linux-x86_64,linux-aarch64'
+      build_targets:
+        description: >-
+          Comma-separated subset of `targets` to BUILD in this run. Empty =
+          all of `targets`. This is the retry lever for a partially failed
+          release: re-dispatch with the SAME tag and only the failed legs —
+          the run reuses the existing draft (successful legs' assets are
+          already on it) and the updater manifest still covers the full
+          `targets` set. A failed leg then costs one leg's minutes, not six.
         required: false
         type: string
         default: ''
@@ -238,6 +267,62 @@ jobs:
         working-directory: ${{ inputs.project_path }}/src-tauri
         run: cargo fmt --all -- --check
 
+  # Resolve which legs the app ships (`targets`) and which THIS run builds
+  # (`build_targets`). Splitting the two is what makes a failed release
+  # resumable: a retry dispatch rebuilds only the failed legs against the same
+  # draft release, while the manifest + verification still cover every shipped
+  # platform. Seconds on ubuntu; saves rebuilding 10×-billed macOS legs that
+  # already succeeded.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.MATRIX }}
+      targets: ${{ steps.plan.outputs.TARGETS }}
+    env:
+      TARGETS: ${{ inputs.targets }}
+      BUILD_TARGETS: ${{ inputs.build_targets }}
+    steps:
+      - name: Compute build matrix
+        id: plan
+        run: |
+          set -euo pipefail
+          # One leg definition per updater-manifest platform key.
+          #   - macOS: native runner per arch — cross-compiling trips
+          #     rustls/ring on apple-sys crates.
+          #   - Windows: pinned to windows-2022 while WebView2 + Tauri
+          #     behaviour on the windows-2025 images stabilises. NSIS-only on
+          #     BOTH arches: WiX/MSI hard-errors on non-numeric semver
+          #     pre-release identifiers (0.2.0-alpha.1) and cannot target
+          #     ARM64 at all. The updater matchers consume the NSIS
+          #     *-setup.exe artifacts.
+          #   - `config` (relative to project_path) applies the per-OS bundle
+          #     overlay; without --config those overrides are DROPPED.
+          LEGS='{
+            "darwin-aarch64":  {"platform":"macos-15","target":"aarch64-apple-darwin","os_name":"darwin","arch":"aarch64","config":"src-tauri/tauri.macos.conf.json","extra_args":""},
+            "darwin-x86_64":   {"platform":"macos-15-intel","target":"x86_64-apple-darwin","os_name":"darwin","arch":"x86_64","config":"src-tauri/tauri.macos.conf.json","extra_args":""},
+            "windows-x86_64":  {"platform":"windows-2022","target":"x86_64-pc-windows-msvc","os_name":"windows","arch":"x86_64","config":"src-tauri/tauri.windows.conf.json","extra_args":"--bundles nsis"},
+            "windows-aarch64": {"platform":"windows-11-arm","target":"aarch64-pc-windows-msvc","os_name":"windows","arch":"aarch64","config":"src-tauri/tauri.windows.conf.json","extra_args":"--bundles nsis"},
+            "linux-x86_64":    {"platform":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","os_name":"linux","arch":"x86_64","config":"src-tauri/tauri.linux.conf.json","extra_args":""},
+            "linux-aarch64":   {"platform":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","os_name":"linux","arch":"aarch64","config":"src-tauri/tauri.linux.conf.json","extra_args":""}
+          }'
+          norm() { printf '%s' "$1" | tr -d '[:space:]' | tr ',' '\n' | sed '/^$/d' | awk '!seen[$0]++'; }
+          TARGET_LIST=$(norm "$TARGETS")
+          [ -n "$TARGET_LIST" ] || { echo "::error::targets input resolved to an empty set"; exit 1; }
+          BUILD_LIST=$(norm "${BUILD_TARGETS:-}")
+          [ -n "$BUILD_LIST" ] || BUILD_LIST="$TARGET_LIST"
+          for t in $TARGET_LIST; do
+            printf '%s' "$LEGS" | jq -e --arg t "$t" 'has($t)' >/dev/null \
+              || { echo "::error::Unknown target '$t' in targets input"; exit 1; }
+          done
+          for t in $BUILD_LIST; do
+            printf '%s\n' $TARGET_LIST | grep -qx -- "$t" \
+              || { echo "::error::build_targets entry '$t' is not in this app's targets set"; exit 1; }
+          done
+          MATRIX=$(printf '%s\n' $BUILD_LIST | jq -cRn --argjson legs "$LEGS" '{include: [inputs | $legs[.]]}')
+          echo "MATRIX=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "TARGETS=$(printf '%s\n' $TARGET_LIST | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          echo "Building: $(printf '%s\n' $BUILD_LIST | paste -sd, -) (shipping set: $(printf '%s\n' $TARGET_LIST | paste -sd, -))"
+
   create-release:
     needs: check-changelog
     runs-on: ubuntu-latest
@@ -291,7 +376,14 @@ jobs:
       # The draft is created on the releases repo (which may be a public
       # mirror — see the header note on private repos). On publish, GitHub
       # creates the tag on that repo's default branch.
-      - name: Create draft release
+      #
+      # FIND-or-create: a retry dispatch for the same tag must land on the
+      # SAME draft so assets from already-successful legs are kept (that is
+      # what makes a failed release cost one leg instead of six). Drafts are
+      # invisible to getReleaseByTag, so scan the release list. A PUBLISHED
+      # release for the tag is a hard error — never silently overwrite what
+      # users' updaters may already have seen.
+      - name: Create or reuse draft release
         id: create-release
         uses: actions/github-script@v9
         env:
@@ -308,6 +400,24 @@ jobs:
             const { readFileSync } = require('node:fs');
             const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME, NOTES_FILE } = process.env;
             const body = readFileSync(NOTES_FILE, 'utf8').trim();
+            const prerelease = CHANNEL !== 'stable';
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: REL_OWNER, repo: REL_NAME, per_page: 100,
+            });
+            const existing = releases.find((r) => r.tag_name === VERSION);
+            if (existing && !existing.draft) {
+              core.setFailed(`A published release for ${VERSION} already exists on ${REL_OWNER}/${REL_NAME} — bump the version (or delete that release) instead of re-releasing the tag.`);
+              return;
+            }
+            if (existing) {
+              core.info(`Reusing draft release ${existing.id} for ${VERSION} (retry run) — refreshing title/notes.`);
+              await github.rest.repos.updateRelease({
+                owner: REL_OWNER, repo: REL_NAME, release_id: existing.id,
+                tag_name: VERSION, name: `${APP_NAME} ${VERSION}`, body,
+                draft: true, prerelease,
+              });
+              return existing.id;
+            }
             const { data } = await github.rest.repos.createRelease({
               owner: REL_OWNER,
               repo: REL_NAME,
@@ -315,68 +425,17 @@ jobs:
               name: `${APP_NAME} ${VERSION}`,
               body,
               draft: true,
-              prerelease: CHANNEL !== 'stable',
+              prerelease,
             })
             return data.id
 
   build-and-release:
-    needs: [check-changelog, create-release, rust-fmt]
+    needs: [check-changelog, create-release, rust-fmt, plan]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # macOS: native runner per arch — cross-compiling trips rustls/ring
-          # on apple-sys crates. `config` (relative to project_path) applies the
-          # per-OS bundle overlay; without --config those overrides are DROPPED.
-          - {
-              platform: macos-15,
-              target: aarch64-apple-darwin,
-              os_name: darwin,
-              arch: aarch64,
-              config: src-tauri/tauri.macos.conf.json,
-            }
-          - {
-              platform: macos-15-intel,
-              target: x86_64-apple-darwin,
-              os_name: darwin,
-              arch: x86_64,
-              config: src-tauri/tauri.macos.conf.json,
-            }
-          # Windows: pinned to windows-2022 while WebView2 + Tauri behaviour on
-          # the windows-2025 images stabilises. NSIS-only on BOTH arches:
-          # WiX/MSI hard-errors on non-numeric semver pre-release identifiers
-          # (0.2.0-alpha.1) and cannot target ARM64 at all. The updater
-          # matchers consume the NSIS *-setup.exe artifacts.
-          - {
-              platform: windows-2022,
-              target: x86_64-pc-windows-msvc,
-              os_name: windows,
-              arch: x86_64,
-              config: src-tauri/tauri.windows.conf.json,
-              extra_args: --bundles nsis,
-            }
-          - {
-              platform: windows-11-arm,
-              target: aarch64-pc-windows-msvc,
-              os_name: windows,
-              arch: aarch64,
-              config: src-tauri/tauri.windows.conf.json,
-              extra_args: --bundles nsis,
-            }
-          - {
-              platform: ubuntu-24.04,
-              target: x86_64-unknown-linux-gnu,
-              os_name: linux,
-              arch: x86_64,
-              config: src-tauri/tauri.linux.conf.json,
-            }
-          - {
-              platform: ubuntu-24.04-arm,
-              target: aarch64-unknown-linux-gnu,
-              os_name: linux,
-              arch: aarch64,
-              config: src-tauri/tauri.linux.conf.json,
-            }
+      # Leg definitions (and the war stories behind them) live in the plan
+      # job — it filters them down to this run's build_targets.
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
 
@@ -568,7 +627,7 @@ jobs:
           echo "macOS signing + notarization verified."
 
   create-updater-json:
-    needs: [check-changelog, create-release, build-and-release]
+    needs: [check-changelog, create-release, build-and-release, plan]
     runs-on: ubuntu-latest
     if: always() && needs.build-and-release.result == 'success'
     steps:
@@ -580,6 +639,7 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
         with:
           github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
@@ -595,14 +655,14 @@ jobs:
             // `size` (bytes) is a kit extension the Tauri plugin ignores;
             // apps read it from the manifest to show download size BEFORE the
             // user commits to an update.
-            const platforms = {
-              'darwin-aarch64': { signature: null, url: null, size: null },
-              'darwin-x86_64': { signature: null, url: null, size: null },
-              'windows-x86_64': { signature: null, url: null, size: null },
-              'windows-aarch64': { signature: null, url: null, size: null },
-              'linux-x86_64': { signature: null, url: null, size: null },
-              'linux-aarch64': { signature: null, url: null, size: null },
-            };
+            //
+            // The platform skeleton is the app's SHIPPED target set (plan's
+            // `targets` output), not this run's build set — on a retry run
+            // the previously-built legs' assets are already on the draft and
+            // must land in the manifest too.
+            const platforms = Object.fromEntries(
+              process.env.TARGETS.split(',').map((t) => [t, { signature: null, url: null, size: null }]),
+            );
 
             // First-match-wins predicates over asset filenames. Windows uses
             // the NSIS *-setup.exe on both arches (no MSI in CI — see matrix).
@@ -635,7 +695,8 @@ jobs:
             const tagBase = `https://github.com/${owner}/${repo}/releases/download/${version}/`;
             for (const asset of assets) {
               for (const matcher of matchers) {
-                if (!matcher.test(asset.name)) continue;
+                // Matchers for platforms outside the app's target set are inert.
+                if (!(matcher.key in platforms) || !matcher.test(asset.name)) continue;
                 if (matcher.kind === 'url') {
                   platforms[matcher.key].url = tagBase + encodeURIComponent(asset.name);
                   platforms[matcher.key].size = asset.size;
@@ -656,6 +717,13 @@ jobs:
             };
 
             const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
+            // A retry run's draft already carries the previous attempt's
+            // manifest; uploading a same-named asset would 422, so replace it.
+            const staleManifest = assets.find((a) => a.name === manifestName);
+            if (staleManifest) {
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: staleManifest.id });
+              core.info(`Replaced stale ${manifestName} from a previous attempt.`);
+            }
             await github.rest.repos.uploadReleaseAsset({
               owner, repo, release_id: release.id, name: manifestName,
               data: Buffer.from(JSON.stringify(updateManifest, null, 2), 'utf8'),
@@ -817,7 +885,7 @@ jobs:
   # a prerelease. Skips with a warning when homebrew_tap / product_name /
   # HOMEBREW_TAP_TOKEN are not configured.
   publish-homebrew-cask:
-    needs: [check-changelog, create-release, publish-release]
+    needs: [check-changelog, create-release, publish-release, plan]
     runs-on: ubuntu-latest
     if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
     steps:
@@ -826,6 +894,7 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PRODUCT_NAME: ${{ inputs.product_name }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -837,6 +906,14 @@ jobs:
             echo "::warning::product_name input not set — skipping Homebrew cask publish"
             exit 0
           fi
+          case ",$TARGETS," in
+            *",darwin-aarch64,"*|*",darwin-x86_64,"*) ;;
+            *)
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::No macOS targets in this app's target set — skipping Homebrew cask publish"
+              exit 0
+              ;;
+          esac
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Generate and push cask
@@ -853,16 +930,53 @@ jobs:
           BUNDLE_ID: ${{ inputs.bundle_identifier }}
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
         run: |
           set -euo pipefail
           BARE="${VERSION#v}"
           BASE_URL="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${VERSION}"
 
-          # Hash the published macOS DMGs (public assets — no auth needed).
-          curl -fsSL -o arm64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_aarch64.dmg"
-          curl -fsSL -o x64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_x64.dmg"
-          SHA_ARM="$(sha256sum arm64.dmg | cut -d' ' -f1)"
-          SHA_X64="$(sha256sum x64.dmg | cut -d' ' -f1)"
+          # The cask only references DMGs for the mac arches the app actually
+          # ships (plan's `targets`); prereq already guaranteed at least one.
+          HAS_ARM=false; HAS_X64=false
+          case ",$TARGETS," in *",darwin-aarch64,"*) HAS_ARM=true;; esac
+          case ",$TARGETS," in *",darwin-x86_64,"*) HAS_X64=true;; esac
+
+          # Hash the published macOS DMGs (public assets — no auth needed) and
+          # render one on_* block per shipped arch. A single-arch app also gets
+          # a `depends_on arch:` guard — a cask with no block for the
+          # visitor's arch fails at install time with a confusing error.
+          ARM_BLOCK=""
+          INTEL_BLOCK=""
+          if [ "$HAS_ARM" = true ]; then
+            curl -fsSL -o arm64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_aarch64.dmg"
+            SHA_ARM="$(sha256sum arm64.dmg | cut -d' ' -f1)"
+            ARM_BLOCK="$(cat <<ARM
+
+            on_arm do
+              sha256 "${SHA_ARM}"
+              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_aarch64.dmg"
+            end
+          ARM
+          )"
+          fi
+          if [ "$HAS_X64" = true ]; then
+            curl -fsSL -o x64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_x64.dmg"
+            SHA_X64="$(sha256sum x64.dmg | cut -d' ' -f1)"
+            INTEL_BLOCK="$(cat <<INTEL
+
+            on_intel do
+              sha256 "${SHA_X64}"
+              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_x64.dmg"
+            end
+          INTEL
+          )"
+          fi
+          ARCH_DEP_LINE=""
+          if [ "$HAS_ARM" != "$HAS_X64" ]; then
+            if [ "$HAS_ARM" = true ]; then ARCH_ONLY=":arm64"; else ARCH_ONLY=":x86_64"; fi
+            ARCH_DEP_LINE="$(printf '\n  depends_on arch: %s' "$ARCH_ONLY")"
+          fi
 
           # Cask tokens are lowercase by Homebrew convention; PRODUCT keeps its
           # original case for asset URLs (the DMG filename stem is case-sensitive).
@@ -912,16 +1026,7 @@ jobs:
           cat > "tap/Casks/${CASK_TOKEN}.rb" <<EOF
           # This file is generated by the tauri-release-kit release workflow. DO NOT EDIT.
           cask "${CASK_TOKEN}" do
-            version "${BARE}"
-
-            on_arm do
-              sha256 "${SHA_ARM}"
-              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_aarch64.dmg"
-            end
-            on_intel do
-              sha256 "${SHA_X64}"
-              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_x64.dmg"
-            end
+            version "${BARE}"${ARM_BLOCK}${INTEL_BLOCK}
 
             name "${APP_NAME}"
             desc "${CASK_DESC}"
@@ -936,7 +1041,7 @@ jobs:
             auto_updates true
             # Bare symbol = "this version or newer"; the string comparison form
             # (">= :ventura") is deprecated in Homebrew 4.x and warns on install.
-            depends_on macos: :ventura
+            depends_on macos: :ventura${ARCH_DEP_LINE}
 
             app "${PRODUCT}.app"${ZAP_BLOCK}${CAVEATS_BLOCK}
           end
