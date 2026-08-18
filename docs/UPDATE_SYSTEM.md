@@ -1,15 +1,15 @@
 # The End-to-End Update System
 
 The canonical update-system design for kit-consuming apps, synthesized from
-two corpus studies (~36 Tauri apps: the email-related corpus and the
-tauri-based fleet) plus anasa's shipped implementation. UI/UX carries the same
-weight as engineering: an update engine users don't discover, can't defer, or
-that restarts over their work is a failed update engine.
+a study of ~36 production Tauri apps plus a shipped implementation. UI/UX
+carries the same weight as engineering: an update engine users don't
+discover, can't defer, or that restarts over their work is a failed update
+engine.
 
-Reference implementation: anasa (`apps/desktop/src-tauri/src/commands/update.rs`,
-`packages/services/src/update-service.ts`,
-`apps/desktop/src/components/settings/updates-settings.tsx`). A portable,
-framework-light port ships in the `tauri-scaf` template.
+The shape of a reference implementation: a Rust update command module
+(check / download / install / staged-state), a frontend update service
+owning the background-check cycle, and a settings-panel component rendering
+the update card states below.
 
 ## Mechanism (Rust)
 
@@ -39,8 +39,7 @@ framework-light port ships in the `tauri-scaf` template.
   public repo, 2xx when live, 404 when missing/private/renamed — and
   surface a distinct, retryable "update source unreachable" error when the
   repo does not answer. Only a probe-confirmed live repo may render the
-  calm no-releases state. (Found the hard way: meltemi audit 2026-07-30 H5;
-  anasa `check_channel` in `commands/update.rs`.)
+  calm no-releases state. (Found the hard way in a production app audit.)
 - **Pin the endpoint contract with unit tests.** The channel endpoints are
   the app↔kit contract; two cheap tests keep them honest: every endpoint
   starts with the releases-repo URL the reachability probe interrogates

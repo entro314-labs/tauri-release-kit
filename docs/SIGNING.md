@@ -2,9 +2,9 @@
 
 This document covers **distribution code signing** — making the OS trust the
 installer (macOS Gatekeeper, Windows SmartScreen). It is separate from the
-Tauri **updater** minisign key documented in
-[`SIGNING_KEY.md`](./SIGNING_KEY.md); both are needed for a fully trusted
-auto-updating release, but they are different mechanisms:
+Tauri **updater** minisign key (step 3 of the README's new-app checklist);
+both are needed for a fully trusted auto-updating release, but they are
+different mechanisms:
 
 | Mechanism            | Purpose                                  | Secrets                                              |
 | -------------------- | ---------------------------------------- | --------------------------------------------------- |
@@ -17,9 +17,9 @@ workflow still builds and uploads **unsigned** artifacts (Gatekeeper /
 SmartScreen will warn users, but the binaries are valid). Nothing hard-requires
 the signing secrets.
 
-The release job reads these via `env:` in
-`.github/workflows/release-with-updater.yml`; `tauri-action` forwards them to
-the Tauri bundler, which only signs/notarizes when a credential set is present.
+The release job reads these via `env:` in the kit's
+`.github/workflows/release.yml`; `tauri-action` forwards them to the Tauri
+bundler, which only signs/notarizes when a credential set is present.
 
 ---
 
@@ -138,21 +138,19 @@ Only needed if you don't use the API key. Requires an app-specific password
 
 If both credential sets are present, the API-key vars take precedence.
 
-### 1.6 Hardened runtime + the bundled dylib
+### 1.6 Hardened runtime + bundled dylibs
 
-`tauri.conf.json`/`tauri.macos.conf.json` set `"hardenedRuntime": true` and
-`"entitlements": "entitlements.plist"`. The entitlements file
-(`apps/desktop/src-tauri/entitlements.plist`) is required because:
+If your app sets `"hardenedRuntime": true` in `tauri.macos.conf.json`, add an
+`"entitlements": "entitlements.plist"` file (next to `tauri.conf.json` in
+`src-tauri/`) covering what your app actually does:
 
 - **WebKit JIT:** `com.apple.security.cs.allow-jit` +
   `allow-unsigned-executable-memory` — the webview crashes under hardened
   runtime without them.
-- **Bundled third-party dylib:**
-  `com.apple.security.cs.disable-library-validation` lets the notarized binary
-  load `resources/libappleai.dylib` (the `tauri-apple-intelligence` bridge,
-  added as a resource in `tauri.macos.conf.json` and `dlopen`ed via `@rpath`).
-  Without it the app aborts with a code-signature failure the first time Apple
-  Intelligence is used.
+- **Bundled third-party dylibs:** if you ship a dylib as a resource and
+  `dlopen` it via `@rpath`, `com.apple.security.cs.disable-library-validation`
+  lets the notarized binary load it. Without it the app aborts with a
+  code-signature failure the first time the dylib is loaded.
 
 Tauri re-signs bundled resources/frameworks with your Developer ID during the
 bundle step, then notarizes the whole `.app`. No manual `codesign` calls are
@@ -163,9 +161,9 @@ needed.
 ```bash
 # After `pnpm tauri build --config src-tauri/tauri.macos.conf.json`:
 codesign --verify --deep --strict --verbose=2 \
-  "src-tauri/target/release/bundle/macos/anasa.app"
-spctl -a -vvv -t install "src-tauri/target/release/bundle/macos/anasa.app"
-xcrun stapler validate "src-tauri/target/release/bundle/macos/anasa.app"
+  "src-tauri/target/release/bundle/macos/MyApp.app"
+spctl -a -vvv -t install "src-tauri/target/release/bundle/macos/MyApp.app"
+xcrun stapler validate "src-tauri/target/release/bundle/macos/MyApp.app"
 ```
 
 ---
@@ -177,9 +175,9 @@ config, not from raw env. There are two supported paths; both leave the
 committed config as a safe no-op (`certificateThumbprint: null` → unsigned) until
 a thumbprint is injected at release time.
 
-> The user is on macOS, so Windows signing is documentation-only here. The
-> committed config builds **unsigned** Windows artifacts. Wire one of the
-> options below when a Windows code-signing certificate is acquired.
+> With no certificate configured the committed config builds **unsigned**
+> Windows artifacts. Wire one of the options below when a Windows
+> code-signing certificate is acquired.
 
 ### Option A — OV/EV certificate by thumbprint (SignTool)
 
@@ -248,7 +246,7 @@ GitHub secrets for this path (consumed by the sign command, never committed):
 Set under **Settings → Secrets and variables → Actions**. Every one is optional;
 omit a group to skip that signing/notarization step.
 
-### Updater (already configured — see SIGNING_KEY.md)
+### Updater (see step 3 of the README's new-app checklist)
 
 | Secret                                | Required for       |
 | ------------------------------------- | ------------------ |
@@ -281,7 +279,7 @@ omit a group to skip that signing/notarization step.
 
 ## 4. What runs in CI
 
-`.github/workflows/release-with-updater.yml`:
+The kit's `.github/workflows/release.yml`:
 
 - The matrix passes `--config src-tauri/tauri.<os>.conf.json` per row so the
   per-OS bundle overrides (macOS entitlements + dylib resource, Windows signing

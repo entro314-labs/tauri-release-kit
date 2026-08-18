@@ -3,8 +3,8 @@
 # release verification, optional Homebrew cask publishing, and a post-release
 # version-bump PR.
 #
-# Re-extracted from anasa's release-with-updater.yml after v0.2.0-alpha.2
-# shipped end-to-end (2026-07-16); every non-obvious step below encodes a
+# Extracted from a production app's release pipeline after its first
+# releases shipped end-to-end; every non-obvious step below encodes a
 # failure that actually happened. See README.md for the consumer checklist and
 # docs/GOTCHAS.md for the war stories.
 #
@@ -42,7 +42,7 @@ on:
   workflow_call:
     inputs:
       app_display_name:
-        description: 'Human name used in release titles, e.g. "Anasa"'
+        description: 'Human name used in release titles, e.g. "MyApp"'
         required: true
         type: string
       project_path:
@@ -249,7 +249,7 @@ jobs:
           echo "Found CHANGELOG entry for ${VERSION}."
 
   # Formatting is target-independent, so one cheap ubuntu runner settles it for
-  # all six legs before the matrix spins up (anasa v0.2.0-alpha.3 burned six
+  # all six legs before the matrix spins up (a real release burned six
   # runners on an import-order diff that each leg's own fmt step then caught).
   # Runs in parallel with check-changelog; needs no system deps or node_modules
   # — rustup still honors the repo's pinned rust-toolchain.toml.
@@ -467,8 +467,8 @@ jobs:
           shared-key: ${{ matrix.target }}
           cache-on-failure: true
 
-      # Plain apt-get, NOT awalsh128/cache-apt-pkgs-action: on the arm64 leg
-      # of anasa v0.2.0-alpha.2 that action reported "Clean installing 12
+      # Plain apt-get, NOT awalsh128/cache-apt-pkgs-action: on a real release's
+      # arm64 leg that action reported "Clean installing 12
       # packages... done" while actually installing ZERO packages, and the
       # build died at glib-sys/pkg-config ten minutes later. A release must
       # fail loudly at the install step; the caching saved ~40s.
@@ -1142,8 +1142,8 @@ jobs:
               new_text, n = re.subn(r'(?m)^version\s*=\s*"' + re.escape(released) + r'"', f'version = "{new}"', text, count=1)
               if n: cargo_toml.write_text(new_text); print("updated Cargo.toml")
 
-          # src-tauri owns the lock when it is its own workspace root (anasa);
-          # repo-root workspaces (astrolabe) keep the lock at the repo root.
+          # src-tauri owns the lock when it is its own workspace root;
+          # repo-root workspaces keep the lock at the repo root.
           cargo_lock = proj / "src-tauri" / "Cargo.lock"
           if not cargo_lock.exists():
               cargo_lock = Path("Cargo.lock")

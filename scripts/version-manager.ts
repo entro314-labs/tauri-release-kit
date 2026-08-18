@@ -2,17 +2,19 @@
 /* oxlint-disable no-console -- this is a CLI tool; console is its output channel */
 
 /**
- * Version Manager for Anasa.
+ * Version manager for Tauri apps consuming tauri-release-kit.
  *
  * Bumps the app version coherently across every file the release `bump-version` CI job touches, so
  * a local `pnpm version:*` produces the same result CI would. It reads the CURRENT version from the
  * root `package.json` (the single source of truth) and increments the requested semver part.
  *
- * It deliberately does NOT generate from a build counter: the previous implementation hardcoded
- * `0.1.<counter>`, so it could only ever emit `0.1.x` and — because the counter drifted from
- * reality (the app is already past 0.1.190) — running it would have RESET the real version. This
- * mirrors `.github/workflows/release-with-updater.yml` → `bump-version` (patch+1 by default,
- * surgical per-file rewrites of the same target set).
+ * It deliberately does NOT generate from a build counter: a predecessor implementation hardcoded
+ * `0.1.<counter>`, so it could only ever emit `0.1.x` and — because the counter drifted from the
+ * real version — running it would have RESET it. This mirrors the kit release workflow's
+ * `bump-version` job (patch+1 by default, surgical per-file rewrites of the same target set).
+ *
+ * Copy into your repo (e.g. tooling/scripts/), adjust the paths and the Cargo.lock package key
+ * below, and run via `tsx`.
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -52,7 +54,7 @@ const VERSION_FILES: VersionFile[] = [
   { path: tauri('tauri.windows.conf.json'), type: 'json', key: 'version' },
   { path: tauri('tauri.linux.conf.json'), type: 'json', key: 'version' },
   { path: tauri('Cargo.toml'), type: 'toml', key: 'version' },
-  { path: tauri('Cargo.lock'), type: 'cargo-lock', key: 'anasa' },
+  { path: tauri('Cargo.lock'), type: 'cargo-lock', key: 'myapp' }, // ← your [[package]] name
 ]
 
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/

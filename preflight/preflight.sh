@@ -2,7 +2,7 @@
 #
 # tauri-release-kit preflight: run the release matrix's fmt/clippy gates
 # locally — on this machine and in docker — before burning paid GitHub
-# runners. Born from anasa v0.2.0-alpha.3, which took five tag recycles for
+# runners. Born from a real release that took five tag recycles for
 # breaks that only surface on the Linux/Windows legs (feature-gated deps,
 # moved windows-crate APIs, doc lints inside cfg'd-out modules).
 #

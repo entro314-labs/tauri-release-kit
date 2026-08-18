@@ -1,7 +1,8 @@
 # Reusable Rust quality gates for Tauri apps: fmt + clippy (+ optional tests)
 # across the three desktop OSes. Run this on branch pushes/PRs so release tags
 # never discover gate failures — the exact failure mode that burned six
-# release-workflow runs on anasa's first release (a Mac cannot see Linux-host
+# release-workflow runs on the first release this kit was extracted from (a
+# Mac cannot see Linux-host
 # or Linux-target diagnostics: unused imports in cfg-gated code, dead_code on
 # platform-only items, doc lints in cfg(linux) modules).
 

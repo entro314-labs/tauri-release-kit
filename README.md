@@ -1,16 +1,16 @@
 # tauri-release-kit
 
-Shared CI/CD + versioning for entro314-labs Tauri apps. One reusable release
+Shared CI/CD + versioning for Tauri desktop apps. One reusable release
 pipeline — 6-platform build matrix, minisign-signed auto-updater artifacts,
 per-channel rolling update manifests (`stable` / `beta` / `alpha`), changelog
 guard, cross-repo publishing to a public releases mirror, pre-publish
 verification, optional Homebrew cask publishing, post-release version-bump PR
-— plus reusable Rust quality gates and a version sync script.
+— plus reusable Rust quality gates, a local preflight harness, and a version
+sync script.
 
-Extracted from anasa's first releases (v0.2.0-alpha.1 2026-07-14, re-extracted
-after v0.2.0-alpha.2 shipped end-to-end 2026-07-16). Every odd-looking step
-encodes a failure that actually happened; read [docs/GOTCHAS.md](docs/GOTCHAS.md)
-before "simplifying" anything.
+Extracted from a production app's first releases. Every odd-looking step
+encodes a CI failure that actually happened; read
+[docs/GOTCHAS.md](docs/GOTCHAS.md) before "simplifying" anything.
 
 ## What consumers call
 
@@ -21,6 +21,11 @@ before "simplifying" anything.
 
 Both are `workflow_call` reusable workflows — fixes land here once and every
 app picks them up. Pin `@main` for latest or a tag for stability.
+
+Assumptions about the calling repo: pnpm frontend (built via
+`beforeBuildCommand`), Tauri project at `<project_path>/src-tauri` with
+per-OS overlay configs, a pinned `rust-toolchain.toml` at the repo root, and
+a keep-a-changelog-style `CHANGELOG.md`. Details below.
 
 ## New app checklist
 
@@ -33,7 +38,11 @@ app picks them up. Pin `@main` for latest or a tag for stability.
    - `templates/tests.yml` → `.github/workflows/tests.yml`
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
-   - `scripts/version-manager.ts` → `tooling/scripts/` (or anywhere; run via `tsx`)
+   - version bumping: either `scripts/version-manager.ts` → `tooling/scripts/`
+     (adjust the paths + Cargo.lock key; run via `tsx`), or
+     [`@entro314labs/release-kit`](https://www.npmjs.com/package/@entro314labs/release-kit)
+     with the config in step 6 — it writes the same files, rolls the
+     CHANGELOG, tags and pushes in one command
    - the preflight wrapper from [`preflight/README.md`](preflight/README.md)
      → `tooling/preflight/preflight.sh` + a `"preflight"` package.json script
      (runs the matrix's fmt/clippy gates locally before a tag push)
@@ -75,6 +84,41 @@ app picks them up. Pin `@main` for latest or a tag for stability.
    # add the CHANGELOG heading, commit, push
    git tag -a v0.2.0-alpha.1 -m "MyApp v0.2.0-alpha.1" && git push origin v0.2.0-alpha.1
    ```
+
+   Or the same thing with release-kit, which also writes the CHANGELOG heading this
+   pipeline requires:
+
+   ```bash
+   release-kit 0.2.0-alpha.1
+   ```
+
+   with `release.config.json` at the repo root:
+
+   ```json
+   {
+     "versionFiles": [
+       "apps/desktop/package.json",
+       "apps/desktop/src-tauri/tauri.conf.json",
+       "apps/desktop/src-tauri/tauri.macos.conf.json",
+       "apps/desktop/src-tauri/tauri.windows.conf.json",
+       "apps/desktop/src-tauri/tauri.linux.conf.json",
+       "apps/desktop/src-tauri/Cargo.toml",
+       "apps/desktop/src-tauri/Cargo.lock"
+     ],
+     "publish": null,
+     "steps": ["version", "changelog", "tag", "push"]
+   }
+   ```
+
+   It stops at `push` on purpose: the tag is what triggers this pipeline, and the pipeline
+   owns building, signing and the GitHub release. Do NOT add `release` to `steps` — both
+   would try to create it and the second fails. `Cargo.lock` is scoped to the crate named
+   in the sibling `Cargo.toml`, so the 500-odd dependency versions in it are left alone.
+   What it adds over the script: `## [Unreleased]` is rolled into the version heading the
+   changelog guard checks for, the annotated tag carries the release notes, and a
+   half-finished run is resumed by re-running it. What it does not do is anything after the
+   tag — that is all still this kit.
+
    Channel is derived from the tag: `-alpha*` → alpha, `-beta*` → beta,
    otherwise stable. Pre-release versions MUST also be set in the version
    files (the `set` command) so the binary's version matches the manifest.
@@ -97,12 +141,10 @@ app picks them up. Pin `@main` for latest or a tag for stability.
      tauri-action deletes same-named assets before re-uploading, and the
      updater manifest is rebuilt and replaced on every attempt.
 
-## One-time org setup
+## Cross-repo tokens
 
-This repo is private, so callers need access: **Settings → Actions → General →
-Access → "Accessible from repositories in the entro314-labs organization"**.
-
-Cross-repo secrets (per app, or org-level shared to selected repos):
+Needed only for the optional cross-repo features (per app, or org-level
+shared to selected repos):
 
 - `RELEASES_TOKEN` — fine-grained PAT, **Contents: Read and write** on the
   releases repo only. Required whenever `releases_repo` is set.
@@ -110,8 +152,12 @@ Cross-repo secrets (per app, or org-level shared to selected repos):
   tap repo only. The cask job skips with a warning when absent.
 
 Use scoped fine-grained PATs, not a broad classic token — and note that
-fine-grained PATs EXPIRE (a vanished `RELEASES_TOKEN` cost anasa a release
-attempt); calendar the renewal.
+fine-grained PATs EXPIRE (a vanished `RELEASES_TOKEN` has cost a real release
+attempt at the publish step, after all legs had built); calendar the renewal.
+
+If you fork this kit into a **private** repo, callers additionally need
+workflow access: **Settings → Actions → General → Access → "Accessible from
+repositories in the … organization"**.
 
 ## Cost notes
 
@@ -136,27 +182,40 @@ layers keep failures cheap, in the order they bite:
    its already-uploaded assets, so a failed leg costs one leg's minutes —
    not a fresh 6-leg matrix with both macOS legs rebuilt.
 
-### Self-hosted runners (consumer repos, since 2026-08-06)
+### Self-hosted runners (consumer test workflows)
 
-anasa and meltemi no longer pay for their per-push test matrix. Both have
-self-hosted runners on the fleet (full map: `devops-dots/NETWORK.md`):
+Per-push test matrices are a good fit for self-hosted runners; two lessons
+from running the kit's consumers that way:
 
-| leg | on push | on PR into main / tag |
-|---|---|---|
-| Linux x64 | `cachy-beastie`, native — free | same |
-| macOS arm64 | `macbook`, native — free | same |
-| Windows x64 build | `cachy-beastie`, **cross-compiled** — free | `windows-latest`, native (2×) |
-| Windows unit tests | not run (they execute; no cross-compiling) | `windows-latest` (2×) |
+- Select legs by **runner label**, so GitHub-image-specific steps (`apt-get`,
+  the `sudo rm -rf` disk-freeing step) stay keyed to `ubuntu-latest` and
+  correctly no-op on self-hosted hardware. Key anything meant to run *once*
+  to the leg (`matrix.platform.name == 'Linux'`) rather than to
+  `ubuntu-latest`, or it silently stops running altogether.
+- This kit's own `release.yml` deliberately stays on GitHub-hosted runners
+  for all six legs: tag-time releases are rare and want pristine,
+  reproducible environments — and the `windows-11-arm` leg has no self-hosted
+  equivalent, since Windows-on-ARM cannot be cross-compiled (cargo-xwin leaks
+  MSVC `/imsvc` flags into the GNU-clang driver `cc-rs` uses for `ring`).
+  Point release builds at self-hosted runners only if you accept a less
+  reproducible release environment.
 
-Their `test.yml` selects legs by **runner label**, so GitHub-image-specific
-steps (`apt-get`, the `sudo rm -rf` disk-freeing step) stay keyed to
-`ubuntu-latest` and correctly no-op on self-hosted hardware. Anything meant to
-run *once* is keyed to the leg (`matrix.platform.name == 'Linux'`) rather than
-to `ubuntu-latest`, or it would silently stop running altogether.
+## Docs
 
-This kit's own `release.yml` still uses GitHub-hosted runners for all six legs.
-Tag-time releases are rare and want pristine, reproducible environments — and
-the `windows-11-arm` leg has no self-hosted equivalent, since Windows-on-ARM
-cannot be cross-compiled (cargo-xwin leaks MSVC `/imsvc` flags into the
-GNU-clang driver `cc-rs` uses for `ring`). Point release builds at self-hosted
-runners only if you accept a less reproducible release environment.
+- [docs/GOTCHAS.md](docs/GOTCHAS.md) — why the pipeline looks the way it
+  does; every entry is a failure that actually happened
+- [docs/SIGNING.md](docs/SIGNING.md) — macOS signing/notarization and
+  Windows signing, end to end
+- [docs/UPDATE_SYSTEM.md](docs/UPDATE_SYSTEM.md) — the end-to-end update
+  system design (Rust mechanism, flow, UI/UX) the kit's manifests feed
+- [preflight/README.md](preflight/README.md) — local release-gate parity
+  before you burn paid runners
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) — in short: read GOTCHAS.md before
+simplifying, and document new failure modes when you work around them.
+
+## License
+
+[MIT](LICENSE)

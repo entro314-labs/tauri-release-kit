@@ -1,7 +1,8 @@
 # Gotchas — why the pipeline looks the way it does
 
-Every entry below is a failure that actually happened during anasa's first
-release (2026-07-14, six workflow runs to green). If you change the pipeline,
+Every entry below is a failure that actually happened during the first
+releases of the production app this kit was extracted from (six workflow
+runs to green on the first release alone). If you change the pipeline,
 re-read this first.
 
 ## Toolchain & gates
@@ -102,7 +103,7 @@ re-read this first.
   workflow edits as "not code" and skip the Rust gates — know your filters
   before trusting a green run as a release probe.
 
-## Private repos cannot serve releases (discovered publishing anasa alpha.1)
+## Private repos cannot serve releases (discovered publishing a first public alpha)
 
 - **Release assets on a private repo 404 for unauthenticated clients** — both
   user downloads AND the tauri updater's manifest polls. A "public alpha from
@@ -120,7 +121,7 @@ re-read this first.
 - **A brand-new releases repo needs an initial commit** before any release can
   be created ("Repository is empty" — tags need a commit to point at).
 
-## Lessons from anasa v0.2.0-alpha.2 (2026-07-16) — all baked into release.yml
+## Lessons from the second shipped release — all baked into release.yml
 
 - **`awalsh128/cache-apt-pkgs-action` silently installs NOTHING sometimes**:
   on the ubuntu-24.04-arm leg it logged "Clean installing 12 packages... done"
@@ -163,8 +164,8 @@ re-read this first.
 - **oxfmt ≥0.59 exits non-zero when every matched file is ignore-listed** —
   gates that "format then diff" a deliberately formatter-ignored file now fail
   before the diff runs.
-- **Target-only Rust code first compiles at release time** (anasa
-  v0.2.0-alpha.3, four tag recycles): `#[cfg(target_os = "…")]` modules are
+- **Target-only Rust code first compiles at release time** (four tag
+  recycles on a real release): `#[cfg(target_os = "…")]` modules are
   invisible to every dev-machine check on another OS, so a feature-gated dep
   (`ashpd` without its `settings` feature) and a moved API
   (`windows::Foundation::IAsyncOperation` → `windows-future`, `.get()` →
