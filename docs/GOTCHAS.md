@@ -80,9 +80,13 @@ re-read this first.
   the tag) or the installed binary reports a different version than the
   manifest and the updater comparison misbehaves. Use `version-manager.ts set`.
 
-- **Recycling a failed release attempt** = delete the draft release AND the
-  tag (remote + local), fix, re-tag. The changelog guard makes a stale-tag
-  redispatch fail fast.
+- **A failed release attempt is RESUMED, not recycled** (since 2026-08-18):
+  the pipeline reuses an existing draft for the tag, so fix on main and
+  re-dispatch with `build_targets=<failed legs>` — successful legs' assets
+  stay, only the failed legs' minutes are spent again. Full recycling
+  (delete the draft release AND the tag, remote + local, fix, re-tag) is
+  only needed when you want the app-repo tag to point at the fixed commit.
+  A tag whose release already went PUBLIC is never reused — bump instead.
 
 - **GitHub billing kills runs with a misleading annotation** ("job was not
   started ... spending limit") on the first job. macOS runners bill 10× on
@@ -150,8 +154,9 @@ re-read this first.
   (spending limit hit / payment failed), not a workflow bug. The only place
   the real reason appears is the check-run ANNOTATION, not the logs.
 - **Reruns use the original workflow snapshot**: fixing the workflow file does
-  nothing for `gh run rerun` — recycle the tag (delete the stale draft first)
-  so the new run picks up the fix.
+  nothing for `gh run rerun`. Dispatch a fresh run instead (it reuses the
+  draft — see the resume bullet above); the new run picks up both workflow
+  and code fixes from the branch HEAD.
 - **Windows default step shell is pwsh**: multi-line `\` continuations in
   cross-platform `run:` blocks die with "Missing expression after unary
   operator '--'". Set `shell: bash` explicitly.

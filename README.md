@@ -79,6 +79,24 @@ app picks them up. Pin `@main` for latest or a tag for stability.
    otherwise stable. Pre-release versions MUST also be set in the version
    files (the `set` command) so the binary's version matches the manifest.
 
+7. **If a leg fails** — resume, don't recycle. The pipeline reuses an
+   existing draft release for the tag, so retry via dispatch with only the
+   failed legs (assets from successful legs are already on the draft):
+   ```bash
+   # fix on main, push, then:
+   gh workflow run release.yml -f tag=v0.2.0-alpha.1 -f build_targets=windows-aarch64
+   ```
+   The dispatch run builds from the branch HEAD (which has your fix) while
+   the manifest + verification still cover the full platform set. Caveats:
+   - The app-repo tag keeps pointing at the pre-fix commit. Usually fine
+     (release provenance lives on the releases repo, whose tag is created at
+     publish); recycle the tag the old way if you want exact provenance.
+   - A release already PUBLISHED for the tag is never reused — the run fails
+     loudly; bump the version instead.
+   - Retrying a leg that failed AFTER uploading its assets is safe:
+     tauri-action deletes same-named assets before re-uploading, and the
+     updater manifest is rebuilt and replaced on every attempt.
+
 ## One-time org setup
 
 This repo is private, so callers need access: **Settings → Actions → General →
@@ -97,17 +115,26 @@ attempt); calendar the renewal.
 
 ## Cost notes
 
-macOS runners bill at 10× on private repos and dominate release cost. The
-gates (fmt/clippy) run before any expensive build so a lint failure costs
-minutes, not builds — and the standalone `rust-fmt` job settles formatting on
-one ubuntu runner before the matrix spins at all.
+macOS runners bill at 10× on private repos and dominate release cost. Four
+layers keep failures cheap, in the order they bite:
 
-**Run [`preflight/`](preflight/README.md) before every tag push.** It runs
-the same fmt/clippy gates locally: native for both mac targets, docker
-ubuntu:24.04 for both Linux targets, and docker cargo-xwin for both Windows
-MSVC targets — the exact three environments whose target-only breaks have
-recycled real release tags. A failed release attempt costs a tag-recycle and
-a 6-leg matrix; a failed preflight stage costs local compute.
+1. **Gates before builds** — fmt/clippy run before any expensive build so a
+   lint failure costs minutes, not builds; the standalone `rust-fmt` job
+   settles formatting on one ubuntu runner before the matrix spins at all.
+2. **Preflight before tags** — run [`preflight/`](preflight/README.md)
+   before every tag push. It runs the same fmt/clippy gates locally: native
+   for both mac targets, docker ubuntu:24.04 for both Linux targets, and
+   docker cargo-xwin for both Windows MSVC targets — the exact three
+   environments whose target-only breaks have recycled real release tags.
+3. **Ship only what you sell** — the `targets` input shrinks the matrix,
+   manifest, verification, and cask to the platforms the app actually ships.
+   Dropping an unused macOS leg saves 10×-billed minutes on every release.
+4. **Resume instead of recycling** — what preflight cannot cover (bundling,
+   signing/notarization, linking, runner-image drift) fails *after* the
+   expensive compile. When a leg fails, re-dispatch with `build_targets` set
+   to just that leg (see the release ritual): the run reuses the draft and
+   its already-uploaded assets, so a failed leg costs one leg's minutes —
+   not a fresh 6-leg matrix with both macOS legs rebuilt.
 
 ### Self-hosted runners (consumer repos, since 2026-08-06)
 
