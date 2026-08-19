@@ -140,6 +140,15 @@ on:
         required: false
         type: string
         default: ''
+      post_release_bump:
+        description: >-
+          Open a post-release PR bumping the app repo to the next patch
+          version (stable releases only). Set false when a local release
+          driver (e.g. release-kit) writes the version BEFORE tagging —
+          otherwise two writers race on the same version files every release.
+        required: false
+        type: boolean
+        default: true
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         description: 'minisign private key for updater artifact signatures (REQUIRED — createUpdaterArtifacts fails without it)'
@@ -1059,12 +1068,14 @@ jobs:
           git push origin HEAD
           echo "Published ${CASK_TOKEN} ${BARE} to ${TAP_REPO}"
 
-  # Post-release patch bump PR (stable releases only). Default GITHUB_TOKEN
-  # pushes don't trigger workflows — re-run CI on the PR manually if needed.
+  # Post-release patch bump PR (stable releases only; opt out via
+  # post_release_bump when a local driver bumps before tagging). Default
+  # GITHUB_TOKEN pushes don't trigger workflows — re-run CI on the PR
+  # manually if needed.
   bump-version:
     needs: [create-release, build-and-release]
     runs-on: ubuntu-latest
-    if: needs.build-and-release.result == 'success' && needs.create-release.outputs.channel == 'stable'
+    if: needs.build-and-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.post_release_bump
     permissions:
       contents: write
       pull-requests: write

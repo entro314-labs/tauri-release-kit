@@ -39,6 +39,10 @@ jobs:
       cargo_package: 'myapp'           # ← [[package]] name in Cargo.lock
       tag: ${{ inputs.tag || '' }}
       build_targets: ${{ inputs.build_targets || '' }}
+      # --- Post-release patch-bump PR (default true). Set false when a local
+      #     release driver (e.g. release-kit) writes the version BEFORE the
+      #     tag — two writers otherwise race on the same version files.
+      # post_release_bump: false
       # --- Shipped platform set (optional). Default = all six legs; list
       #     fewer to skip legs you don't ship — each dropped macOS leg saves
       #     10×-billed minutes on every release.
