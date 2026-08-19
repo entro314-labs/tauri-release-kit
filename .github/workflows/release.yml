@@ -1,7 +1,7 @@
 # Reusable Tauri release workflow: 6-platform build matrix, minisign-signed
 # auto-updater artifacts, per-channel rolling update manifests, changelog guard,
-# release verification, optional Homebrew cask publishing, and a post-release
-# version-bump PR.
+# distribution code signing on all three OSes, release verification, optional
+# Homebrew cask publishing, and a post-release version-bump PR.
 #
 # Extracted from a production app's release pipeline after its first
 # releases shipped end-to-end; every non-obvious step below encodes a
@@ -22,8 +22,21 @@
 #     releases_repo is set):
 #       stable      → releases/latest/download/latest.json
 #       alpha/beta  → releases/download/latest-<channel>/latest.json
-#   - Windows ships NSIS only (WiX/MSI hard-rejects non-numeric semver
-#     pre-release identifiers like `-alpha.1`, and WiX cannot target ARM64)
+#   - Windows ships NSIS by default (WiX/MSI hard-rejects non-numeric semver
+#     pre-release identifiers like `-alpha.1`, and WiX cannot target ARM64;
+#     `windows_bundles: 'nsis,msi'` opts into MSI and the pipeline drops it
+#     on the legs/versions where it cannot work rather than failing)
+#
+# DISTRIBUTION SIGNING is optional on every OS and degrades gracefully: with no
+# secrets the pipeline ships unsigned artifacts and says so; with a credential
+# set it signs AND verifies, failing loudly rather than shipping something the
+# OS will reject.
+#   - macOS: APPLE_* → codesign + notarize + staple, verified with
+#     codesign/spctl/stapler
+#   - Windows: signCommand (any issuer CLI) | Azure Artifact Signing | a PFX in
+#     the runner cert store, verified with Get-AuthenticodeSignature
+#   - Linux: one GPG key signs the AppImage (SIGN/APPIMAGETOOL_*) and the RPM
+#     (TAURI_SIGNING_RPM_KEY), verified with --appimage-signature / rpm -K
 #
 # PRIVATE app repos MUST set `releases_repo` to a PUBLIC repo + provide
 # RELEASES_TOKEN: private-repo release assets 404 for unauthenticated users,
@@ -129,6 +142,80 @@ on:
         required: false
         type: string
         default: 'darwin-aarch64,darwin-x86_64,windows-x86_64,windows-aarch64,linux-x86_64,linux-aarch64'
+      macos_bundles:
+        description: >-
+          Comma-separated macOS bundle formats (subset of: app, dmg). `app` is
+          REQUIRED while any darwin target ships — the updater consumes the
+          .app.tar.gz that only the `app` bundle produces. `dmg` is the
+          user-facing installer (and what the Homebrew cask points at).
+        required: false
+        type: string
+        default: 'app,dmg'
+      windows_bundles:
+        description: >-
+          Comma-separated Windows bundle formats (subset of: nsis, msi).
+          `nsis` is REQUIRED while any windows target ships — the updater
+          consumes the *-setup.exe. `msi` is DROPPED with a warning (not an
+          error) on the legs and versions where WiX cannot work: prerelease
+          versions (WiX rejects non-numeric semver identifiers like
+          `-alpha.1`) and the aarch64 leg (WiX cannot target ARM64).
+        required: false
+        type: string
+        default: 'nsis'
+      linux_bundles:
+        description: >-
+          Comma-separated Linux bundle formats (subset of: deb, rpm,
+          appimage). `appimage` is REQUIRED while any linux target ships — the
+          updater consumes the .AppImage. deb/rpm are the distro packages the
+          Flatpak and AUR pipelines consume downstream.
+        required: false
+        type: string
+        default: 'deb,rpm,appimage'
+      windows_sign_command:
+        description: >-
+          Escape hatch for Windows signing: a verbatim
+          `bundle > windows > signCommand` (MUST contain the `%1` placeholder).
+          Takes precedence over every auto-detected mode below — use it for
+          SSL.com eSigner, an HSM/YubiKey tool, `relic` against Azure Key
+          Vault, or any issuer-specific CLI. The tool must already be on the
+          runner PATH (install it in the caller before this workflow, or use a
+          command that bootstraps itself).
+        required: false
+        type: string
+        default: ''
+      windows_azure_endpoint:
+        description: >-
+          Azure Artifact Signing (ex Azure Trusted Signing) endpoint, e.g.
+          https://wus2.codesigning.azure.net. Set together with
+          windows_azure_account + windows_azure_cert_profile and the
+          AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_TENANT_ID secrets to sign
+          via artifact-signing-cli.
+        required: false
+        type: string
+        default: ''
+      windows_azure_account:
+        description: 'Azure Artifact Signing account name (-a)'
+        required: false
+        type: string
+        default: ''
+      windows_azure_cert_profile:
+        description: 'Azure Artifact Signing certificate profile name (-c)'
+        required: false
+        type: string
+        default: ''
+      windows_timestamp_url:
+        description: >-
+          RFC3161 timestamp server for the PFX/thumbprint signing mode. A
+          timestamped signature stays valid after the certificate expires;
+          an untimestamped one does not.
+        required: false
+        type: string
+        default: 'http://timestamp.digicert.com'
+      windows_digest_algorithm:
+        description: 'Digest algorithm for the PFX/thumbprint signing mode'
+        required: false
+        type: string
+        default: 'sha256'
       build_targets:
         description: >-
           Comma-separated subset of `targets` to BUILD in this run. Empty =
@@ -182,6 +269,40 @@ on:
       APPLE_PASSWORD:
         required: false
       APPLE_TEAM_ID:
+        required: false
+      # --- Windows distribution signing (all optional; unset = unsigned) ---
+      WINDOWS_CERTIFICATE:
+        description: 'base64 of a code-signing .pfx. Imported into the runner cert store; its thumbprint is read back and injected into the bundle config.'
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        description: 'Export password of WINDOWS_CERTIFICATE'
+        required: false
+      WINDOWS_CERTIFICATE_THUMBPRINT:
+        description: >-
+          SHA-1 thumbprint to sign with. Optional even in PFX mode (it is read
+          back from the import); REQUIRED on its own when the certificate is
+          already present on a self-hosted runner or lives on an HSM/token.
+        required: false
+      AZURE_CLIENT_ID:
+        description: 'Azure Artifact Signing service principal (app registration) client id'
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      # --- Linux artifact signing (optional; one GPG key signs AppImage + RPM) ---
+      LINUX_GPG_PRIVATE_KEY:
+        description: >-
+          ASCII-armored private key (or its base64) used to sign the AppImage
+          (gpg, via appimagetool) and the RPM (tauri-bundler). Unset = unsigned
+          Linux artifacts, which is a valid choice — Linux does not gate
+          execution on signatures.
+        required: false
+      LINUX_GPG_PASSPHRASE:
+        description: 'Passphrase for LINUX_GPG_PRIVATE_KEY. REQUIRED in CI when the key has one — gpg would otherwise block on a TTY prompt that never comes.'
+        required: false
+      LINUX_GPG_KEY_ID:
+        description: 'Key ID/fingerprint to sign with. Defaults to the first secret key in the imported keyring.'
         required: false
       SENTRY_DSN:
         description: 'Optional: baked into release builds as SENTRY_DSN + VITE_SENTRY_DSN (non-empty only)'
@@ -283,13 +404,21 @@ jobs:
   # platform. Seconds on ubuntu; saves rebuilding 10×-billed macOS legs that
   # already succeeded.
   plan:
+    needs: check-changelog
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.MATRIX }}
       targets: ${{ steps.plan.outputs.TARGETS }}
+      windows_bundles: ${{ steps.plan.outputs.WINDOWS_BUNDLES }}
+      linux_bundles: ${{ steps.plan.outputs.LINUX_BUNDLES }}
+      macos_bundles: ${{ steps.plan.outputs.MACOS_BUNDLES }}
     env:
       TARGETS: ${{ inputs.targets }}
       BUILD_TARGETS: ${{ inputs.build_targets }}
+      MACOS_BUNDLES: ${{ inputs.macos_bundles }}
+      WINDOWS_BUNDLES: ${{ inputs.windows_bundles }}
+      LINUX_BUNDLES: ${{ inputs.linux_bundles }}
+      VERSION: ${{ needs.check-changelog.outputs.version }}
     steps:
       - name: Compute build matrix
         id: plan
@@ -299,20 +428,19 @@ jobs:
           #   - macOS: native runner per arch — cross-compiling trips
           #     rustls/ring on apple-sys crates.
           #   - Windows: pinned to windows-2022 while WebView2 + Tauri
-          #     behaviour on the windows-2025 images stabilises. NSIS-only on
-          #     BOTH arches: WiX/MSI hard-errors on non-numeric semver
-          #     pre-release identifiers (0.2.0-alpha.1) and cannot target
-          #     ARM64 at all. The updater matchers consume the NSIS
-          #     *-setup.exe artifacts.
+          #     behaviour on the windows-2025 images stabilises. The updater
+          #     matchers consume the NSIS *-setup.exe artifacts on both
+          #     arches; MSI, when requested, is an extra installer for
+          #     stable x86_64 only (see the degradation rules below).
           #   - `config` (relative to project_path) applies the per-OS bundle
           #     overlay; without --config those overrides are DROPPED.
           LEGS='{
-            "darwin-aarch64":  {"platform":"macos-15","target":"aarch64-apple-darwin","os_name":"darwin","arch":"aarch64","config":"src-tauri/tauri.macos.conf.json","extra_args":""},
-            "darwin-x86_64":   {"platform":"macos-15-intel","target":"x86_64-apple-darwin","os_name":"darwin","arch":"x86_64","config":"src-tauri/tauri.macos.conf.json","extra_args":""},
-            "windows-x86_64":  {"platform":"windows-2022","target":"x86_64-pc-windows-msvc","os_name":"windows","arch":"x86_64","config":"src-tauri/tauri.windows.conf.json","extra_args":"--bundles nsis"},
-            "windows-aarch64": {"platform":"windows-11-arm","target":"aarch64-pc-windows-msvc","os_name":"windows","arch":"aarch64","config":"src-tauri/tauri.windows.conf.json","extra_args":"--bundles nsis"},
-            "linux-x86_64":    {"platform":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","os_name":"linux","arch":"x86_64","config":"src-tauri/tauri.linux.conf.json","extra_args":""},
-            "linux-aarch64":   {"platform":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","os_name":"linux","arch":"aarch64","config":"src-tauri/tauri.linux.conf.json","extra_args":""}
+            "darwin-aarch64":  {"platform":"macos-15","target":"aarch64-apple-darwin","os_name":"darwin","arch":"aarch64","config":"src-tauri/tauri.macos.conf.json"},
+            "darwin-x86_64":   {"platform":"macos-15-intel","target":"x86_64-apple-darwin","os_name":"darwin","arch":"x86_64","config":"src-tauri/tauri.macos.conf.json"},
+            "windows-x86_64":  {"platform":"windows-2022","target":"x86_64-pc-windows-msvc","os_name":"windows","arch":"x86_64","config":"src-tauri/tauri.windows.conf.json"},
+            "windows-aarch64": {"platform":"windows-11-arm","target":"aarch64-pc-windows-msvc","os_name":"windows","arch":"aarch64","config":"src-tauri/tauri.windows.conf.json"},
+            "linux-x86_64":    {"platform":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","os_name":"linux","arch":"x86_64","config":"src-tauri/tauri.linux.conf.json"},
+            "linux-aarch64":   {"platform":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","os_name":"linux","arch":"aarch64","config":"src-tauri/tauri.linux.conf.json"}
           }'
           norm() { printf '%s' "$1" | tr -d '[:space:]' | tr ',' '\n' | sed '/^$/d' | awk '!seen[$0]++'; }
           TARGET_LIST=$(norm "$TARGETS")
@@ -327,10 +455,68 @@ jobs:
             printf '%s\n' $TARGET_LIST | grep -qx -- "$t" \
               || { echo "::error::build_targets entry '$t' is not in this app's targets set"; exit 1; }
           done
+          # --- Bundle formats per OS -------------------------------------
+          # Validated against the formats tauri's CLI actually accepts, then
+          # reduced per leg. A format the updater NEEDS is a hard error (a
+          # missing one produces a manifest entry with a null url that
+          # verify-release rejects after the whole matrix has already been
+          # paid for); a format that merely CANNOT work on a given leg is
+          # dropped with a warning, so one impossible combination never costs
+          # an otherwise-shippable release.
+          ships() { printf '%s\n' $TARGET_LIST | grep -q "^$1-"; }
+          check_formats() {
+            local os="$1" allowed="$2" required="$3" list="$4"
+            for f in $list; do
+              printf '%s\n' $allowed | grep -qx -- "$f" \
+                || { echo "::error::Unknown ${os} bundle format '$f' (allowed: $(printf '%s ' $allowed))"; exit 1; }
+            done
+            if ships "$os" && ! printf '%s\n' $list | grep -qx -- "$required"; then
+              echo "::error::${os} targets are shipped but '${required}' is missing from the ${os}_bundles input — the updater manifest cannot be built without it"
+              exit 1
+            fi
+          }
+          MAC_LIST=$(norm "$MACOS_BUNDLES")
+          WIN_LIST=$(norm "$WINDOWS_BUNDLES")
+          LIN_LIST=$(norm "$LINUX_BUNDLES")
+          check_formats darwin  "app dmg"          app      "$MAC_LIST"
+          check_formats windows "nsis msi"         nsis     "$WIN_LIST"
+          check_formats linux   "deb rpm appimage" appimage "$LIN_LIST"
+
+          # MSI degradations — both are hard upstream limits, not policy:
+          #   1. WiX rejects non-numeric semver pre-release identifiers, so
+          #      `0.2.0-alpha.1` fails at bundle time on a leg that already
+          #      compiled.
+          #   2. WiX has no ARM64 target at all.
+          WIN_X64_LIST="$WIN_LIST"
+          WIN_ARM_LIST="$WIN_LIST"
+          if printf '%s\n' $WIN_LIST | grep -qx msi; then
+            if printf '%s' "${VERSION#v}" | grep -q -- '-'; then
+              echo "::warning::Dropping the msi bundle for prerelease ${VERSION} — WiX rejects non-numeric semver pre-release identifiers. NSIS still ships on every Windows leg."
+              WIN_X64_LIST=$(printf '%s\n' $WIN_X64_LIST | grep -vx msi || true)
+            fi
+            echo "::warning::Dropping the msi bundle on windows-aarch64 — WiX cannot target ARM64. NSIS still ships there."
+            WIN_ARM_LIST=$(printf '%s\n' $WIN_ARM_LIST | grep -vx msi || true)
+          fi
+
+          csv() { printf '%s\n' $1 | paste -sd, -; }
+          MAC_CSV=$(csv "$MAC_LIST"); WIN_X64_CSV=$(csv "$WIN_X64_LIST")
+          WIN_ARM_CSV=$(csv "$WIN_ARM_LIST"); LIN_CSV=$(csv "$LIN_LIST")
+
+          LEGS=$(printf '%s' "$LEGS" | jq -c \
+            --arg mac "$MAC_CSV" --arg win "$WIN_X64_CSV" --arg winarm "$WIN_ARM_CSV" --arg lin "$LIN_CSV" '
+            with_entries(.value.bundles = (
+              if   .value.os_name == "darwin"  then $mac
+              elif .value.os_name == "windows" then (if .value.arch == "aarch64" then $winarm else $win end)
+              else $lin end))')
+
           MATRIX=$(printf '%s\n' $BUILD_LIST | jq -cRn --argjson legs "$LEGS" '{include: [inputs | $legs[.]]}')
           echo "MATRIX=$MATRIX" >> "$GITHUB_OUTPUT"
           echo "TARGETS=$(printf '%s\n' $TARGET_LIST | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          echo "MACOS_BUNDLES=$MAC_CSV" >> "$GITHUB_OUTPUT"
+          echo "WINDOWS_BUNDLES=$WIN_X64_CSV" >> "$GITHUB_OUTPUT"
+          echo "LINUX_BUNDLES=$LIN_CSV" >> "$GITHUB_OUTPUT"
           echo "Building: $(printf '%s\n' $BUILD_LIST | paste -sd, -) (shipping set: $(printf '%s\n' $TARGET_LIST | paste -sd, -))"
+          echo "Bundles — macOS: ${MAC_CSV:-none}  Windows: ${WIN_X64_CSV:-none} (arm64: ${WIN_ARM_CSV:-none})  Linux: ${LIN_CSV:-none}"
 
   create-release:
     needs: check-changelog
@@ -483,6 +669,8 @@ jobs:
       # fail loudly at the install step; the caching saved ~40s.
       # libfuse2t64: linuxdeploy is itself an AppImage and needs FUSE2 to run;
       # the ubuntu-24.04 images (20260714+) no longer ship it.
+      # rpm: only needed to VERIFY the bundled .rpm's signature below —
+      # tauri-bundler writes RPMs itself, no rpmbuild involved.
       - name: Install Linux dependencies
         if: matrix.os_name == 'linux'
         run: |
@@ -499,7 +687,23 @@ jobs:
             librsvg2-dev \
             patchelf \
             xdg-utils \
-            libfuse2t64
+            libfuse2t64 \
+            rpm
+
+      # Bundling three Linux formats writes the payload three times on top of
+      # a release target dir and node_modules. Stock runners have ~14 GB free,
+      # and running out surfaces as an unrelated "failed to run linuxdeploy"
+      # with a buried disk-space warning — so make room first, on
+      # GitHub-hosted images only (self-hosted runners have no such bloat and
+      # the paths simply won't exist).
+      - name: Free runner disk space
+        if: matrix.os_name == 'linux'
+        run: |
+          BEFORE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          AFTER=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "Free space: ${BEFORE}G -> ${AFTER}G"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -557,6 +761,248 @@ jobs:
             fi
           done
 
+      # Windows distribution signing. Four modes, first match wins; every one
+      # is optional and an unmatched runner ships UNSIGNED (SmartScreen warns
+      # on download, the installer still runs). The matched mode is written as
+      # a bundle-config OVERLAY that `tauri build` merges via a second
+      # --config, so the app repo commits no thumbprint and no issuer-specific
+      # command, and the same config builds unsigned on a contributor's
+      # machine.
+      #
+      # Partially-configured modes are a hard error, not a silent fall-through
+      # to unsigned: half a credential set means someone intended to sign, and
+      # discovering that from an unsigned artifact after publish is far more
+      # expensive than failing here.
+      - name: Configure Windows code signing
+        id: win_sign
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        env:
+          SIGN_COMMAND: ${{ inputs.windows_sign_command }}
+          AZURE_ENDPOINT: ${{ inputs.windows_azure_endpoint }}
+          AZURE_ACCOUNT: ${{ inputs.windows_azure_account }}
+          AZURE_CERT_PROFILE: ${{ inputs.windows_azure_cert_profile }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          TIMESTAMP_URL: ${{ inputs.windows_timestamp_url }}
+          DIGEST_ALGORITHM: ${{ inputs.windows_digest_algorithm }}
+          APP_NAME: ${{ inputs.app_display_name }}
+          OVERLAY_DIR: ${{ inputs.project_path }}/src-tauri
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $overlayRel = 'src-tauri/.release-kit.windows-sign.conf.json'
+          $overlayAbs = Join-Path $env:OVERLAY_DIR '.release-kit.windows-sign.conf.json'
+          $windows = $null
+          $mode = 'none'
+
+          $hasAzureCreds = $env:AZURE_CLIENT_ID -and $env:AZURE_CLIENT_SECRET -and $env:AZURE_TENANT_ID
+          $hasAzureInputs = $env:AZURE_ENDPOINT -and $env:AZURE_ACCOUNT -and $env:AZURE_CERT_PROFILE
+
+          if ($env:SIGN_COMMAND) {
+            # Escape hatch: any issuer CLI. %1 is where tauri substitutes the
+            # file being signed — without it the command silently signs
+            # nothing at all.
+            if ($env:SIGN_COMMAND -notmatch '%1') {
+              Write-Output "::error::windows_sign_command must contain the %1 placeholder for the file to sign"
+              exit 1
+            }
+            $mode = 'command'
+            # Object notation, not the string one: tauri splits a signCommand
+            # STRING on plain spaces with no quote handling, so a quoted
+            # argument becomes two broken ones. Splitting here and emitting
+            # {cmd, args} keeps that behaviour explicit — a caller who needs
+            # whitespace inside one argument should use an argument file or a
+            # wrapper script.
+            $parts = $env:SIGN_COMMAND -split '\s+' | Where-Object { $_ }
+            $windows = @{ signCommand = @{
+              cmd  = $parts[0]
+              args = @($parts[1..($parts.Length - 1)])
+            } }
+          }
+          elseif ($hasAzureCreds -or $hasAzureInputs) {
+            if (-not $hasAzureCreds) {
+              Write-Output "::error::windows_azure_* inputs are set but the AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID secrets are not — Azure Artifact Signing cannot authenticate"
+              exit 1
+            }
+            if (-not $hasAzureInputs) {
+              Write-Output "::error::Azure credentials are present but windows_azure_endpoint / windows_azure_account / windows_azure_cert_profile are not all set"
+              exit 1
+            }
+            $mode = 'azure'
+            # artifact-signing-cli reads AZURE_* from the environment; it is
+            # not preinstalled on the runner images.
+            Write-Output "Installing artifact-signing-cli (a few minutes on a cold cargo cache)..."
+            cargo install artifact-signing-cli --locked
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error::Failed to install artifact-signing-cli — cannot sign with Azure Artifact Signing"
+              exit 1
+            }
+            # Object notation — the app display name routinely contains a
+            # space, and tauri's string form would split it into two arguments.
+            # -d is what the UAC prompt shows when a user runs an MSI; without
+            # it the prompt names the installer with a random string.
+            $windows = @{ signCommand = @{
+              cmd  = 'artifact-signing-cli'
+              args = @(
+                '-e', $env:AZURE_ENDPOINT,
+                '-a', $env:AZURE_ACCOUNT,
+                '-c', $env:AZURE_CERT_PROFILE,
+                '-d', $env:APP_NAME,
+                '%1'
+              )
+            } }
+          }
+          elseif ($env:WINDOWS_CERTIFICATE) {
+            if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+              Write-Output "::error::WINDOWS_CERTIFICATE is set but WINDOWS_CERTIFICATE_PASSWORD is not — a .pfx cannot be imported without its export password"
+              exit 1
+            }
+            $mode = 'pfx'
+            $pfx = Join-Path $env:RUNNER_TEMP 'code-signing.pfx'
+            # Strip whitespace and any PEM-style armour before decoding:
+            # `certutil -encode` wraps its output in BEGIN/END lines and hard
+            # line breaks, `openssl base64 -A` produces neither, and both are
+            # things people paste into this secret.
+            $raw = ($env:WINDOWS_CERTIFICATE -replace '-{5}[^-]+-{5}', '') -replace '\s', ''
+            try {
+              [System.IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($raw))
+            } catch {
+              Write-Output "::error::WINDOWS_CERTIFICATE is not valid base64 — produce it with 'openssl base64 -A -in certificate.pfx -out base64cert.txt'"
+              exit 1
+            }
+            $secure = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            try {
+              $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+            } catch {
+              Write-Output "::error::Could not import the .pfx — wrong WINDOWS_CERTIFICATE_PASSWORD, or the file is not a PKCS#12 bundle containing the private key. ($($_.Exception.Message))"
+              Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+              exit 1
+            }
+            Remove-Item $pfx -Force
+            $thumb = $cert.Thumbprint
+            if ($env:WINDOWS_CERTIFICATE_THUMBPRINT -and $env:WINDOWS_CERTIFICATE_THUMBPRINT -ne $thumb) {
+              # The store now holds a different certificate than the pinned
+              # one; signing with the wrong cert is worse than not signing.
+              Write-Output "::error::Imported certificate thumbprint $thumb does not match the pinned WINDOWS_CERTIFICATE_THUMBPRINT"
+              exit 1
+            }
+            $windows = @{
+              certificateThumbprint = $thumb
+              digestAlgorithm       = $env:DIGEST_ALGORITHM
+              timestampUrl          = $env:TIMESTAMP_URL
+            }
+          }
+          elseif ($env:WINDOWS_CERTIFICATE_THUMBPRINT) {
+            # Certificate already in the runner's store (self-hosted runner, or
+            # an HSM/token whose CSP exposes it).
+            $mode = 'thumbprint'
+            $windows = @{
+              certificateThumbprint = $env:WINDOWS_CERTIFICATE_THUMBPRINT
+              digestAlgorithm       = $env:DIGEST_ALGORITHM
+              timestampUrl          = $env:TIMESTAMP_URL
+            }
+          }
+
+          if ($mode -eq 'none') {
+            Write-Output "::notice::No Windows signing credentials configured — shipping UNSIGNED Windows installers. SmartScreen will warn users on download."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "mode=none"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "config_arg="
+            exit 0
+          }
+
+          @{ bundle = @{ windows = $windows } } | ConvertTo-Json -Depth 6 |
+            Set-Content -Path $overlayAbs -Encoding utf8
+          Write-Output "Windows signing mode: $mode (overlay: $overlayRel)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "mode=$mode"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "config_arg=--config $overlayRel"
+
+      # Linux artifact signing. One GPG key signs BOTH the AppImage (gpg via
+      # appimagetool) and the RPM (tauri-bundler's own rpm signer); the .deb is
+      # left unsigned because apt verifies repository signatures, not package
+      # ones, and a standalone .deb download has no signature check to satisfy.
+      #
+      # Unsigned is a legitimate Linux release — nothing refuses to run — so an
+      # absent key is a notice, not a failure. A key that is PRESENT but fails
+      # to sign is a failure (APPIMAGETOOL_FORCE_SIGN below): appimagetool
+      # otherwise emits a perfectly valid *unsigned* AppImage and exits 0.
+      - name: Import Linux signing key
+        id: linux_sign
+        if: matrix.os_name == 'linux'
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LINUX_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::notice::No LINUX_GPG_PRIVATE_KEY — shipping unsigned Linux artifacts (nothing on Linux refuses to run them)."
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          KEY_FILE="${RUNNER_TEMP}/linux-signing.asc"
+          # Accept the armored key directly or base64-wrapped (the GitHub
+          # secrets UI mangles neither, but people reach for base64 anyway).
+          if printf '%s' "$LINUX_GPG_PRIVATE_KEY" | grep -q 'BEGIN PGP PRIVATE KEY'; then
+            printf '%s\n' "$LINUX_GPG_PRIVATE_KEY" > "$KEY_FILE"
+          elif printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode 2>/dev/null | grep -q 'BEGIN PGP PRIVATE KEY'; then
+            printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode > "$KEY_FILE"
+          else
+            echo "::error::LINUX_GPG_PRIVATE_KEY is neither an ASCII-armored private key nor base64 of one. Export it with 'gpg --armor --export-secret-keys <KEY_ID>'."
+            exit 1
+          fi
+          chmod 600 "$KEY_FILE"
+
+          # Loopback pinentry: without it gpg blocks forever on a passphrase
+          # dialog no CI runner can answer, and the job dies at the 6h timeout.
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo 'allow-loopback-pinentry' >> ~/.gnupg/gpg-agent.conf
+          echo 'pinentry-mode loopback'  >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+
+          if [ -n "${LINUX_GPG_PASSPHRASE:-}" ]; then
+            gpg --batch --yes --passphrase "$LINUX_GPG_PASSPHRASE" --import "$KEY_FILE"
+          else
+            gpg --batch --yes --import "$KEY_FILE"
+          fi
+
+          KEY_ID="${LINUX_GPG_KEY_ID:-}"
+          if [ -z "$KEY_ID" ]; then
+            KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')
+          fi
+          if [ -z "$KEY_ID" ]; then
+            echo "::error::No secret key present after import — the key material did not load"
+            exit 1
+          fi
+          # Ultimate ownertrust, or gpg refuses to sign non-interactively.
+          printf '%s:6:\n' "$KEY_ID" | gpg --batch --import-ownertrust
+
+          {
+            echo "SIGN=1"
+            echo "SIGN_KEY=${KEY_ID}"
+            # Fail the bundle when signing fails instead of shipping an
+            # unsigned AppImage that looks identical to a signed one.
+            echo "APPIMAGETOOL_FORCE_SIGN=1"
+            if [ -n "${LINUX_GPG_PASSPHRASE:-}" ]; then
+              echo "APPIMAGETOOL_SIGN_PASSPHRASE=${LINUX_GPG_PASSPHRASE}"
+              echo "TAURI_SIGNING_RPM_KEY_PASSPHRASE=${LINUX_GPG_PASSPHRASE}"
+            fi
+            # tauri-bundler wants the key MATERIAL, not a key id. Multi-line
+            # values need GITHUB_ENV's heredoc form.
+            echo "TAURI_SIGNING_RPM_KEY<<__RELEASE_KIT_RPM_KEY__"
+            cat "$KEY_FILE"
+            echo "__RELEASE_KIT_RPM_KEY__"
+          } >> "$GITHUB_ENV"
+          rm -f "$KEY_FILE"
+
+          echo "signing=true" >> "$GITHUB_OUTPUT"
+          echo "key_id=${KEY_ID}" >> "$GITHUB_OUTPUT"
+          echo "Linux signing key ${KEY_ID} imported (AppImage + RPM)."
+
       # Optional telemetry wiring: apps that report to Sentry set the
       # SENTRY_DSN / SENTRY_AUTH_TOKEN secrets and read the env at build time
       # (VITE_SENTRY_DSN for the frontend bundle). Non-empty-only for the same
@@ -594,9 +1040,12 @@ jobs:
         with:
           projectPath: ${{ inputs.project_path }}
           tauriScript: pnpm tauri
-          # `--config` applies the per-OS bundle overlay; `extra_args` only
-          # renders for matrix entries that set it (undefined keys are empty).
-          args: --target ${{ matrix.target }} --config ${{ matrix.config }} ${{ matrix.extra_args }}
+          # Config files merge in the order given (tauri CLI `--config` is a
+          # Vec): the per-OS bundle overlay first, then the signing overlay
+          # this run generated (empty on every leg without one). `--bundles`
+          # is the plan job's per-leg format list, already degraded for
+          # combinations the toolchain cannot produce.
+          args: --target ${{ matrix.target }} --config ${{ matrix.config }} ${{ steps.win_sign.outputs.config_arg }} --bundles ${{ matrix.bundles }}
           releaseId: ${{ needs.create-release.outputs.release_id }}
           # The release id may live on the (public) releases repo, so point
           # tauri-action at it explicitly — its API calls default to
@@ -617,23 +1066,120 @@ jobs:
         if: matrix.os_name == 'darwin'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          BUNDLES: ${{ matrix.bundles }}
           BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
         run: |
           set -euo pipefail
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "APPLE_SIGNING_IDENTITY unset — unsigned build, skipping Gatekeeper assessment." >&2
+            echo "::warning::APPLE_SIGNING_IDENTITY unset — shipping an UNSIGNED macOS build. Downloaded Apple Silicon builds are reported as \"damaged\" unless the bundle config sets an ad-hoc identity (\"signingIdentity\": \"-\")."
             exit 0
           fi
           APP="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
-          DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
-          if [ -z "$APP" ] || [ -z "$DMG" ]; then
-            echo "::error::Could not locate the built .app/.dmg under $BUNDLE_DIR" >&2
+          if [ -z "$APP" ]; then
+            echo "::error::Could not locate the built .app under $BUNDLE_DIR/macos" >&2
             exit 1
           fi
           codesign --verify --deep --strict --verbose=2 "$APP"
-          spctl -a -vvv -t install "$DMG"
-          xcrun stapler validate "$DMG"
-          echo "macOS signing + notarization verified."
+          # Only the DMG carries the stapled notarization ticket, and it only
+          # exists when `dmg` is in this leg's bundle list.
+          case ",$BUNDLES," in
+            *,dmg,*)
+              DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+              if [ -z "$DMG" ]; then
+                echo "::error::dmg is in this leg's bundle list but no .dmg was produced under $BUNDLE_DIR/dmg" >&2
+                exit 1
+              fi
+              spctl -a -vvv -t install "$DMG"
+              xcrun stapler validate "$DMG"
+              echo "macOS signing + notarization verified (app + dmg)."
+              ;;
+            *)
+              echo "macOS signing verified (no dmg in this leg's bundle list — notarization ticket not checked)."
+              ;;
+          esac
+
+      # SmartScreen gate. tauri-bundler does not fail the build when a sign
+      # command is misconfigured or a certificate is unusable, so without this
+      # step a "signed" release can ship entirely unsigned. Chain-of-trust
+      # problems are a warning (the runner's trust store is not the user's);
+      # a missing or broken signature is an error.
+      - name: Verify Windows signatures
+        if: matrix.os_name == 'windows' && steps.win_sign.outputs.mode != 'none'
+        shell: pwsh
+        env:
+          SIGN_MODE: ${{ steps.win_sign.outputs.mode }}
+          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @()
+          foreach ($pattern in @('nsis/*.exe', 'msi/*.msi')) {
+            $installers += Get-ChildItem -Path (Join-Path $env:BUNDLE_DIR $pattern) -ErrorAction SilentlyContinue
+          }
+          if ($installers.Count -eq 0) {
+            Write-Output "::error::Windows signing mode is '$($env:SIGN_MODE)' but no installer was found under $($env:BUNDLE_DIR)"
+            exit 1
+          }
+          $failed = $false
+          foreach ($file in $installers) {
+            $sig = Get-AuthenticodeSignature $file.FullName
+            switch ($sig.Status) {
+              'Valid' {
+                Write-Output "signed  $($file.Name)  [$($sig.SignerCertificate.Subject)]"
+              }
+              { $_ -in 'NotSigned', 'HashMismatch' } {
+                Write-Output "::error::$($file.Name): $($sig.Status) — signing mode '$($env:SIGN_MODE)' produced no valid signature"
+                $failed = $true
+              }
+              default {
+                # UnknownError / NotTrusted: a signature exists but this
+                # runner cannot chain it to a trusted root. Normal for
+                # internal CAs and for Azure Artifact Signing's short-lived
+                # certificates.
+                Write-Output "::warning::$($file.Name): signature present but not verifiable on this runner ($($sig.Status)) — check it against a real user machine"
+              }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      # AppImage and RPM signature verification. APPIMAGETOOL_FORCE_SIGN
+      # already fails the bundle on a signing error, so this catches the
+      # subtler case: signing that "succeeded" against a key nothing can
+      # verify. All findings here are warnings — the artifacts are already
+      # built and Linux gates nothing on signatures.
+      - name: Verify Linux signatures
+        if: matrix.os_name == 'linux' && steps.linux_sign.outputs.signing == 'true'
+        env:
+          KEY_ID: ${{ steps.linux_sign.outputs.key_id }}
+          BUNDLES: ${{ matrix.bundles }}
+          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+        run: |
+          set -uo pipefail
+          case ",$BUNDLES," in *,appimage,*)
+            APPIMAGE="$(find "$BUNDLE_DIR/appimage" -maxdepth 1 -name '*.AppImage' -print -quit 2>/dev/null || true)"
+            if [ -z "$APPIMAGE" ]; then
+              echo "::warning::appimage is in this leg's bundle list but no .AppImage was found to verify"
+            elif "$APPIMAGE" --appimage-signature 2>/dev/null | grep -q 'PGP SIGNATURE'; then
+              echo "AppImage carries an embedded signature ($(basename "$APPIMAGE"))."
+            else
+              echo "::warning::$(basename "$APPIMAGE") has no readable embedded signature. Note that AppImage NEVER validates its own signature — publish the key fingerprint ${KEY_ID} over TLS so users can check it with the AppImage validate tool."
+            fi
+          ;; esac
+          case ",$BUNDLES," in *,rpm,*)
+            RPM="$(find "$BUNDLE_DIR/rpm" -maxdepth 1 -name '*.rpm' -print -quit 2>/dev/null || true)"
+            if [ -z "$RPM" ]; then
+              echo "::warning::rpm is in this leg's bundle list but no .rpm was found to verify"
+            elif ! command -v rpm >/dev/null 2>&1; then
+              echo "::warning::rpm(1) unavailable — skipping RPM signature check"
+            else
+              gpg --armor --export "$KEY_ID" > "${RUNNER_TEMP}/RPM-GPG-KEY"
+              sudo rpm --import "${RUNNER_TEMP}/RPM-GPG-KEY" || true
+              if rpm -K "$RPM" | grep -qi 'signatures OK'; then
+                echo "RPM signature verified ($(basename "$RPM"))."
+              else
+                echo "::warning::$(basename "$RPM") is not signed by ${KEY_ID}: $(rpm -K "$RPM" 2>&1 | head -1)"
+              fi
+            fi
+          ;; esac
 
   create-updater-json:
     needs: [check-changelog, create-release, build-and-release, plan]
@@ -904,6 +1450,7 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PRODUCT_NAME: ${{ inputs.product_name }}
           TARGETS: ${{ needs.plan.outputs.targets }}
+          MACOS_BUNDLES: ${{ needs.plan.outputs.macos_bundles }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -920,6 +1467,15 @@ jobs:
             *)
               echo "ready=false" >> "$GITHUB_OUTPUT"
               echo "::warning::No macOS targets in this app's target set — skipping Homebrew cask publish"
+              exit 0
+              ;;
+          esac
+          # A cask installs a DMG. Without one there is nothing to point it at.
+          case ",$MACOS_BUNDLES," in
+            *",dmg,"*) ;;
+            *)
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::'dmg' is not in macos_bundles — skipping Homebrew cask publish (a cask needs a .dmg to install)"
               exit 0
               ;;
           esac

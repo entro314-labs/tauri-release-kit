@@ -1,12 +1,17 @@
 # tauri-release-kit
 
-Shared CI/CD + versioning for Tauri desktop apps. One reusable release
-pipeline — 6-platform build matrix, minisign-signed auto-updater artifacts,
-per-channel rolling update manifests (`stable` / `beta` / `alpha`), changelog
-guard, cross-repo publishing to a public releases mirror, pre-publish
-verification, optional Homebrew cask publishing, post-release version-bump PR
-— plus reusable Rust quality gates, a local preflight harness, and a version
-sync script.
+Shared CI/CD + versioning for Tauri apps. One reusable release pipeline —
+6-platform build matrix, every bundle format Tauri emits, distribution code
+signing on all three OSes, minisign-signed auto-updater artifacts, per-channel
+rolling update manifests (`stable` / `beta` / `alpha`), changelog guard,
+cross-repo publishing to a public releases mirror, pre-publish verification,
+post-release version-bump PR — plus companion workflows that push the same
+release onward to Homebrew, Flathub, the AUR, and the App Store, reusable Rust
+quality gates, a local preflight harness, and a version sync script.
+
+Every optional piece degrades gracefully: no credentials means that channel
+skips itself with a warning, never a failed release. A *half*-configured one
+fails immediately, because that is someone's intent going silently unmet.
 
 Extracted from a production app's first releases. Every odd-looking step
 encodes a CI failure that actually happened; read
@@ -18,9 +23,25 @@ encodes a CI failure that actually happened; read
 | --- | --- |
 | `.github/workflows/release.yml` | Tag-triggered release: build → sign → manifest → verify → publish |
 | `.github/workflows/rust-checks.yml` | fmt + clippy (+ tests) on ubuntu/macos/windows for branch pushes |
+| `.github/workflows/flatpak.yml` | Repacks the released `.deb` into a Flatpak bundle + Flathub manifest |
+| `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
+| `.github/workflows/app-store.yml` | Builds and uploads a Mac App Store `.pkg` / iOS `.ipa` |
 
-Both are `workflow_call` reusable workflows — fixes land here once and every
-app picks them up. Pin `@main` for latest or a tag for stability.
+All five are `workflow_call` reusable workflows — fixes land here once and
+every app picks them up. Pin `@main` for latest or a tag for stability. The
+last three chain off `release.yml` with `needs:` in one caller file; see
+[`templates/release.yml`](templates/release.yml).
+
+### Distribution channels
+
+| Channel | Built from | Wired by |
+| --- | --- | --- |
+| Direct download (dmg / setup.exe / AppImage / deb / rpm) | source | `release.yml` |
+| Auto-updater (per channel) | the above | `release.yml` |
+| Homebrew cask | the released `.dmg` | `release.yml` (`homebrew_tap`) |
+| Flathub / Flatpak bundle | the released `.deb` | `flatpak.yml` |
+| Arch User Repository | the released `.deb` | `aur.yml` |
+| Mac App Store / iOS App Store | source (separate, sandboxed build) | `app-store.yml` |
 
 Assumptions about the calling repo: pnpm frontend (built via
 `beforeBuildCommand`), Tauri project at `<project_path>/src-tauri` with
@@ -71,12 +92,29 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
 4. **CHANGELOG.md** at the repo root. The pipeline refuses to release a tag
    `vX.Y.Z` without a `## [X.Y.Z]` heading.
 
-5. **macOS signing (optional, per-app secrets)**: `APPLE_CERTIFICATE` (base64
-   .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, plus
-   notarization via either `APPLE_API_ISSUER`/`APPLE_API_KEY`/`APPLE_API_KEY_BASE64`
-   (App Store Connect API key, preferred) or `APPLE_ID`/`APPLE_PASSWORD`/
-   `APPLE_TEAM_ID` (app-specific password fallback). See [docs/SIGNING.md](docs/SIGNING.md).
-   Unset secrets are handled safely — the pipeline only exports non-empty ones.
+5. **Distribution signing (all optional, per-app secrets)** — see
+   [docs/SIGNING.md](docs/SIGNING.md) for the full setup of each:
+   - **macOS**: `APPLE_CERTIFICATE` (base64 .p12),
+     `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, plus notarization
+     via either `APPLE_API_ISSUER`/`APPLE_API_KEY`/`APPLE_API_KEY_BASE64`
+     (App Store Connect API key, preferred) or
+     `APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID` (app-specific password).
+   - **Windows**: one of — Azure Artifact Signing (`AZURE_CLIENT_ID` /
+     `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` + the `windows_azure_*`
+     inputs), a `.pfx` (`WINDOWS_CERTIFICATE` +
+     `WINDOWS_CERTIFICATE_PASSWORD`), or any issuer CLI via the
+     `windows_sign_command` input.
+   - **Linux**: `LINUX_GPG_PRIVATE_KEY` (+ `LINUX_GPG_PASSPHRASE`) signs the
+     AppImage and the RPM with one key.
+
+   Unset secrets are handled safely — the pipeline only exports non-empty
+   ones, and each OS's artifacts are verified after the build so signing that
+   silently did nothing cannot reach users.
+
+   **Bundle formats** default to `app,dmg` / `nsis` / `deb,rpm,appimage` and
+   are set per OS with the `macos_bundles` / `windows_bundles` /
+   `linux_bundles` inputs. See [docs/PACKAGING.md](docs/PACKAGING.md) for what
+   each format is for and its configuration surface.
 
 6. **Release ritual**:
    ```bash
@@ -204,12 +242,21 @@ from running the kit's consumers that way:
 
 - [docs/GOTCHAS.md](docs/GOTCHAS.md) — why the pipeline looks the way it
   does; every entry is a failure that actually happened
-- [docs/SIGNING.md](docs/SIGNING.md) — macOS signing/notarization and
-  Windows signing, end to end
+- [docs/SIGNING.md](docs/SIGNING.md) — macOS, Windows and Linux distribution
+  signing, end to end
+- [docs/PACKAGING.md](docs/PACKAGING.md) — every bundle format, what it is
+  for, and its configuration surface (WebView2 modes, NSIS hooks, WiX
+  fragments, rpm scriptlets, AppImage limits, the glibc rule)
+- [docs/APP_STORE.md](docs/APP_STORE.md) — Mac App Store and iOS submission
+- [docs/LINUX_STORES.md](docs/LINUX_STORES.md) — Flathub and the AUR
 - [docs/UPDATE_SYSTEM.md](docs/UPDATE_SYSTEM.md) — the end-to-end update
   system design (Rust mechanism, flow, UI/UX) the kit's manifests feed
 - [preflight/README.md](preflight/README.md) — local release-gate parity
   before you burn paid runners
+- [templates/appstore/](templates/appstore/) — App Store config overlay,
+  entitlements and Info.plist to copy into `src-tauri/`
+- [templates/flatpak/](templates/flatpak/) — AppStream MetaInfo and an
+  escape-hatch flatpak manifest
 
 ## Contributing
 

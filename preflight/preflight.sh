@@ -13,7 +13,8 @@
 #   windows x64/arm64  — docker cargo-xwin (clang-cl + downloaded MSVC SDK),
 #                        cargo clippy per target. Compile+lint parity with the
 #                        CI gate; NSIS bundling stays CI-only.
-#   --full adds a complete Linux bundle build (AppImage/deb) from a clean
+#   --full adds a complete Linux bundle build (deb/rpm/AppImage, or whatever
+#     PF_LINUX_BUNDLES names) from a clean
 #   clone of HEAD — the only stage that requires changes to be COMMITTED.
 #
 # Clippy stages bind-mount the working tree, so they test UNCOMMITTED changes;
@@ -184,6 +185,7 @@ stage_linux_bundle() {
     -v "${PF_NAME}-pf-bundle-target":/cache/target \
     -e NO_STRIP=true \
     -e PF_PROJECT_PATH="$PF_PROJECT_PATH" \
+    -e PF_LINUX_BUNDLES="${PF_LINUX_BUNDLES:-deb,rpm,appimage}" \
     "${LINUX_IMAGE}-arm64" bash -ceu '
       command -v rustup >/dev/null 2>&1 || curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain none --no-modify-path >/dev/null
@@ -192,9 +194,12 @@ stage_linux_bundle() {
       pnpm install --frozen-lockfile
       cd "$PF_PROJECT_PATH"
       pnpm exec tauri build \
+        --bundles "$PF_LINUX_BUNDLES" \
         --config src-tauri/tauri.linux.conf.json \
         --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
-      ls -lh /cache/target/release/bundle/appimage/*.AppImage /cache/target/release/bundle/deb/*.deb 2>/dev/null || true
+      ls -lh /cache/target/release/bundle/appimage/*.AppImage \
+             /cache/target/release/bundle/deb/*.deb \
+             /cache/target/release/bundle/rpm/*.rpm 2>/dev/null || true
     '
 }
 

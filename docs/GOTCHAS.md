@@ -50,12 +50,97 @@ re-read this first.
 
 ## Platform packaging
 
-- **Windows is NSIS-only in CI.** WiX/MSI hard-errors on non-numeric semver
-  pre-release identifiers (`0.2.0-alpha.1`), and WiX can't target ARM64 at
-  all. The updater manifest matchers consume `*_x64-setup.exe` /
-  `*_arm64-setup.exe` (+ `.sig`). If you re-enable MSI for stable releases,
-  update the matchers too — a manifest with a null platform fails
-  verify-release on purpose.
+- **Windows is NSIS-only by default.** WiX/MSI hard-errors on non-numeric
+  semver pre-release identifiers (`0.2.0-alpha.1`), and WiX can't target ARM64
+  at all. `windows_bundles: 'nsis,msi'` opts into MSI and the `plan` job drops
+  it — with a warning, not an error — on prerelease versions and on the
+  aarch64 leg, so one impossible combination never costs a shippable release.
+  The updater manifest matchers consume `*_x64-setup.exe` /
+  `*_arm64-setup.exe` (+ `.sig`) and deliberately ignore `.msi`; a manifest
+  with a null platform fails verify-release on purpose.
+
+- **`--config` is a list, `--bundles` is comma-separated.** Tauri's CLI takes
+  `--config` repeatedly and merges the files in order (later wins), which is
+  how the pipeline layers a generated Windows-signing overlay on top of the
+  per-OS config without the app repo committing a thumbprint. `--bundles`
+  takes `app,dmg` in one flag. Valid bundle names are exactly `app`, `dmg`,
+  `nsis`, `msi`, `deb`, `rpm`, `appimage`, `ios`, `updater`.
+
+- **A `signCommand` STRING is split on plain spaces, with no quote handling.**
+  Tauri's own config docs say so: the string form splits on `' '`, takes the
+  first element as the command and the rest as arguments. `-d "My App"`
+  therefore becomes two broken arguments. Use the object notation
+  (`{"cmd": "...", "args": [...]}`) whenever any argument can contain
+  whitespace — which includes every app display name with a space in it. The
+  pipeline emits the object form for exactly this reason.
+
+- **An unset signing credential and a half-set one are different failures.**
+  Nothing configured → unsigned artifacts and a notice, which is a legitimate
+  release. `WINDOWS_CERTIFICATE` without its password, or Azure credentials
+  without an endpoint → hard error. Someone intended to sign; finding out from
+  an unsigned artifact after publish costs far more than failing at the
+  configure step.
+
+- **A "signed" build can be entirely unsigned.** tauri-bundler does not fail
+  when a `signCommand` is misconfigured or a certificate is unusable, and
+  appimagetool emits a valid *unsigned* AppImage and exits 0 when gpg fails.
+  Hence `APPIMAGETOOL_FORCE_SIGN=1` and the per-OS verification steps
+  (`Get-AuthenticodeSignature`, `--appimage-signature`, `rpm -K`,
+  `codesign`/`spctl`/`stapler`). A sign command missing its `%1` placeholder
+  signs nothing and reports success — the pipeline rejects one outright.
+
+- **gpg in CI blocks forever without loopback pinentry.** A passphrase-
+  protected key makes gpg open a dialog no runner can answer, and the job dies
+  at the 6-hour timeout rather than failing. `allow-loopback-pinentry` in
+  `gpg-agent.conf` plus `pinentry-mode loopback` in `gpg.conf`, and an
+  ownertrust import, are all required for non-interactive signing.
+
+- **DMG icon positions are ignored on CI** ([tauri#1731]). The background
+  image applies; `appPosition` / `applicationFolderPosition` / `windowSize`
+  do not. Local builds therefore look different from released ones — design
+  the background to read correctly with default placement.
+
+- **Bundling three Linux formats can exhaust the runner disk.** deb + rpm +
+  AppImage write the payload three times on top of a release target dir and
+  node_modules, against ~14 GB free. It surfaces as "failed to run
+  linuxdeploy" with a buried disk-space warning, which is also what FUSE and
+  binutils problems look like — hence the disk-freeing step before the build.
+
+- **The glibc floor is set by the build image, not by config.** Building on
+  ubuntu-24.04 means users on older distributions get
+  `/usr/lib/libc.so.6: version 'GLIBC_2.33' not found` at startup. Supporting
+  older systems means building on 22.04 or Debian 12 — the oldest bases that
+  still ship `libwebkit2gtk-4.1-dev`.
+
+- **AppImage never validates its own signature.** Embedding one is not a
+  tamper check; nothing verifies it at run time. It is only meaningful if you
+  publish the key fingerprint over TLS so users can check it with the
+  AppImage validate tool. RPM signatures, by contrast, are checked by
+  `rpm`/`dnf` once the user imports the key. `.deb` has no per-package
+  signature check at all — Debian signs repositories, not packages.
+
+- **App Store and direct-download builds are different artifacts.** Different
+  certificate types, sandbox on vs off, embedded provisioning profile vs none,
+  notarization vs review, updater off vs on. Signing a direct download with an
+  App Store certificate produces something Gatekeeper distrusts; submitting a
+  Developer ID build to review gets it rejected. They are two pipelines here
+  for that reason.
+
+- **`altool` finds its API key by filename.** It must be
+  `AuthKey_<KEY_ID>.p8` in `./private_keys`, `~/private_keys`,
+  `~/.private_keys` or `~/.appstoreconnect/private_keys`. A correct key with
+  any other name is simply not found, and the error does not say so.
+
+- **`security set-key-partition-list` is what stops the hang.** Import a
+  certificate into a keychain without it and macOS shows a "codesign wants to
+  use key" GUI prompt that a runner can never answer. The build does not
+  fail — it hangs until the job times out.
+
+- **`makepkg` refuses to run as root**, including for `--printsrcinfo`. Any
+  containerized AUR validation needs an unprivileged user, which is the same
+  thing every AUR contributor hits locally.
+
+[tauri#1731]: https://github.com/tauri-apps/tauri/issues/1731
 
 - **Apple-only crates must live in `[target.'cfg(target_os = "macos")'.dependencies]`.**
   `objc2` emits a hard `compile_error!` on non-Apple targets, so having it in

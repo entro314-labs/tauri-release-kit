@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Hardened-runtime entitlements for the DIRECT-DOWNLOAD (Developer ID)
+	     build. Notarization requires the hardened runtime, and the hardened
+	     runtime breaks a WebKit webview without the two JIT entitlements. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<!-- Only if you ship a third-party dylib and dlopen it via @rpath.
+	     Without this the notarized app aborts with a code-signature failure
+	     the first time that library is loaded. -->
+	<!--
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	-->
+</dict>
+</plist>

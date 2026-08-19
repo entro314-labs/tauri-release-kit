@@ -1,6 +1,12 @@
 # Thin caller for the shared Tauri release pipeline.
 # Copy to .github/workflows/release.yml in your app repo and fill in the
 # inputs. Full consumer checklist: tauri-release-kit README.
+#
+# The `release` job is the pipeline. The jobs after it are OPTIONAL
+# distribution channels chained with `needs: release` so they run against a
+# published release — DELETE the ones you do not ship. Each one also skips
+# itself with a warning when its credentials are absent, so leaving one in
+# place while you set its secrets up is safe.
 name: Release
 
 on:
@@ -47,6 +53,24 @@ jobs:
       #     fewer to skip legs you don't ship — each dropped macOS leg saves
       #     10×-billed minutes on every release.
       # targets: 'darwin-aarch64,darwin-x86_64,windows-x86_64,linux-x86_64,linux-aarch64'
+      # --- Bundle formats per OS (optional; defaults shown). The formats the
+      #     updater needs (app / nsis / appimage) cannot be removed while that
+      #     platform ships. `msi` is dropped automatically on prerelease
+      #     versions and on ARM64, where WiX cannot work.
+      # macos_bundles: 'app,dmg'
+      # windows_bundles: 'nsis'
+      # linux_bundles: 'deb,rpm,appimage'
+      # --- Windows code signing (optional; unset = unsigned + SmartScreen
+      #     warning). Pick ONE:
+      #     a) Azure Artifact Signing — set these three inputs plus the
+      #        AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID secrets
+      # windows_azure_endpoint: 'https://wus2.codesigning.azure.net'
+      # windows_azure_account: 'MyAccount'
+      # windows_azure_cert_profile: 'MyProfile'
+      #     b) A .pfx certificate — set the WINDOWS_CERTIFICATE +
+      #        WINDOWS_CERTIFICATE_PASSWORD secrets and nothing here
+      #     c) Any other issuer CLI — set the full command (must contain %1)
+      # windows_sign_command: 'my-signer --file %1'
       # --- Cross-repo publishing (REQUIRED for private app repos: private
       #     release assets 404 anonymously, breaking downloads + auto-update).
       #     Needs the RELEASES_TOKEN secret (fine-grained PAT, Contents:RW on
@@ -60,4 +84,59 @@ jobs:
       cask_desc: 'One-line app description'
       cask_homepage: 'https://example.com'
       bundle_identifier: 'com.example.myapp' # ← tauri.conf.json identifier (cask zap paths)
+    secrets: inherit
+
+  # --- OPTIONAL: Flatpak. Repacks the released .deb into a Flatpak bundle,
+  #     attaches it to the release, and emits a Flathub-ready manifest as a
+  #     workflow artifact. DELETE this job if you don't ship a Flatpak.
+  flatpak:
+    needs: release
+    uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@main
+    permissions:
+      contents: write
+    with:
+      tag: ${{ inputs.tag || '' }}
+      releases_repo: 'my-org/myapp-releases'
+      app_id: 'com.example.myapp'      # ← MUST equal tauri.conf.json identifier
+      product_name: 'myapp'
+      arches: 'x86_64'                 # ← add aarch64 once you ship an arm64 .deb
+      # metainfo: 'apps/desktop/flatpak.metainfo.xml'  # ← required for Flathub
+      # tray_icon: true                # ← only if the app has a tray icon
+      # runtime_version: '48'
+    secrets: inherit
+
+  # --- OPTIONAL: Arch User Repository. Publishes a `-bin` package built from
+  #     the released .deb. Needs the AUR_SSH_PRIVATE_KEY secret; without it the
+  #     PKGBUILD is still rendered and validated, just not pushed.
+  #     DELETE this job if you don't publish to the AUR.
+  aur:
+    needs: release
+    uses: entro314-labs/tauri-release-kit/.github/workflows/aur.yml@main
+    with:
+      tag: ${{ inputs.tag || '' }}
+      releases_repo: 'my-org/myapp-releases'
+      pkgname: 'myapp-bin'             # ← the `-bin` suffix is required by Arch
+      pkgdesc: 'One-line app description'
+      url: 'https://example.com'
+      license: 'MIT'
+      maintainer: 'Your Name <you@example.com>'
+      provides: 'myapp'
+      conflicts: 'myapp'
+      # dry_run: true                  # ← validate without publishing
+    secrets: inherit
+
+  # --- OPTIONAL: Mac App Store / iOS. A DIFFERENT artifact from the release
+  #     above (sandboxed, no updater), so it builds from source rather than
+  #     reusing the release assets. Needs src-tauri/tauri.appstore.conf.json
+  #     plus the App Store secrets — see docs/APP_STORE.md.
+  #     DELETE this job if you don't submit to the App Store.
+  app-store:
+    needs: release
+    uses: entro314-labs/tauri-release-kit/.github/workflows/app-store.yml@main
+    with:
+      project_path: 'apps/desktop'
+      product_name: 'MyApp'            # ← productName exactly, including case
+      macos: true
+      ios: false
+      # validate_only: true            # ← run Apple's checks without uploading
     secrets: inherit

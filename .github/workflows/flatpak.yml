@@ -1,0 +1,441 @@
+# Reusable Flatpak workflow: turns the .deb this kit's release pipeline already
+# published into a Flatpak bundle, attaches it to the release, and emits a
+# Flathub-ready manifest as a workflow artifact.
+#
+# WHY FROM THE .deb, not from source: a source build inside flatpak-builder
+# needs offline-vendored cargo AND node sources (flatpak-cargo-generator.py +
+# flatpak-node-generator), regenerated on every dependency change, and it
+# recompiles the whole app a second time. Repacking the .deb reuses the exact
+# binary users already downloaded — same bits, one build. It is also what
+# Flathub's own guidance suggests for closed-source and prebuilt apps.
+#
+# Run it AFTER release.yml has published the release (`needs: release` in the
+# caller), because it downloads a published asset.
+#
+# GRACEFUL DEGRADATION: no .deb for an architecture means that architecture is
+# skipped with a warning, not a failure — a Flatpak is a nice-to-have and must
+# never retroactively fail a release that already shipped.
+
+name: Flatpak (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to package (vX.Y.Z). Defaults to the pushed tag ref.'
+        required: false
+        type: string
+        default: ''
+      releases_repo:
+        description: "'owner/name' hosting the release assets. Empty = this repo."
+        required: false
+        type: string
+        default: ''
+      app_id:
+        description: >-
+          Flatpak application ID — must equal tauri.conf.json > identifier and
+          be a valid reverse-DNS name (e.g. com.example.MyApp). Flathub
+          additionally requires that you control the domain, or that you use
+          io.github.<user>.<repo>.
+        required: true
+        type: string
+      product_name:
+        description: 'tauri.conf.json productName — the .deb filename stem'
+        required: true
+        type: string
+      runtime_version:
+        description: >-
+          org.gnome.Platform / org.gnome.Sdk branch. The GNOME runtime carries
+          the WebKitGTK, GTK and libsoup versions a Tauri app needs; Flathub
+          keeps several branches alive, so pin one and bump it deliberately.
+        required: false
+        type: string
+        default: '48'
+      arches:
+        description: >-
+          Comma-separated architectures to build (subset of: x86_64, aarch64).
+          Each needs a matching .deb on the release.
+        required: false
+        type: string
+        default: 'x86_64'
+      tray_icon:
+        description: >-
+          Add the tray-icon permissions (--talk-name=org.kde.StatusNotifierWatcher
+          and --filesystem=xdg-run/tray-icon:create). Only enable it if the app
+          actually has a tray icon — Flathub reviewers question every
+          permission. The alternative is TrayIconBuilder::temp_dir_path() into
+          the app cache dir, which needs no extra permission at all.
+        required: false
+        type: boolean
+        default: false
+      extra_finish_args:
+        description: >-
+          Additional finish-args, one per line (e.g. --share=network,
+          --filesystem=xdg-documents). Every one of these is a permission you
+          will be asked to justify on Flathub.
+        required: false
+        type: string
+        default: ''
+      manifest_template:
+        description: >-
+          Escape hatch: path to your own flatpak-builder manifest. The
+          placeholders @APP_ID@, @VERSION@, @DEB_URL@, @DEB_SHA256@ and
+          @ARCH@ are substituted before the build. When empty, the workflow
+          generates a manifest from the inputs above.
+        required: false
+        type: string
+        default: ''
+      metainfo:
+        description: >-
+          Path to an AppStream MetaInfo XML file. Flathub REQUIRES one (name,
+          summary, description, screenshots, releases, license). When empty a
+          minimal placeholder is generated so the bundle still builds — that
+          placeholder will not pass Flathub review.
+        required: false
+        type: string
+        default: ''
+      attach_to_release:
+        description: 'Upload the built .flatpak bundle to the release'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      RELEASES_TOKEN:
+        description: 'Fine-grained PAT with Contents:RW on releases_repo. Required when releases_repo is set.'
+        required: false
+
+jobs:
+  flatpak:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      # Flatpak cannot cross-build: an aarch64 Flatpak needs an aarch64
+      # runner. The matrix always has both entries (a matrix cannot be
+      # computed from a comma list without a second job), so unselected
+      # architectures short-circuit here.
+      - name: Select architecture
+        id: select
+        env:
+          ARCHES: ${{ inputs.arches }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case ",$(printf '%s' "$ARCHES" | tr -d '[:space:]')," in
+            *",${ARCH},"*) echo "selected=true"  >> "$GITHUB_OUTPUT" ;;
+            *)             echo "selected=false" >> "$GITHUB_OUTPUT"
+                           echo "${ARCH} not in the arches input — nothing to do." ;;
+          esac
+
+      - uses: actions/checkout@v7
+        if: steps.select.outputs.selected == 'true'
+
+      - name: Resolve release
+        id: rel
+        if: steps.select.outputs.selected == 'true'
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::'$TAG' is not a semver release tag — pass the tag input explicitly when not running on a tag push"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
+      # The .deb is the only input this workflow needs. A missing one is a
+      # skip, not a failure: an app may deliberately ship AppImage-only on one
+      # architecture.
+      - name: Download the .deb
+        id: deb
+        if: steps.select.outputs.selected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          REPO: ${{ steps.rel.outputs.repo }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Debian architecture names differ from Rust/Flatpak ones.
+          case "$ARCH" in
+            x86_64)  DEB_ARCH=amd64 ;;
+            aarch64) DEB_ARCH=arm64 ;;
+            *) echo "::error::Unsupported architecture '$ARCH'"; exit 1 ;;
+          esac
+          ASSET=$(gh release view "$TAG" --repo "$REPO" --json assets \
+            --jq ".assets[].name | select(endswith(\"_${DEB_ARCH}.deb\"))" | head -1)
+          if [ -z "$ASSET" ]; then
+            echo "::warning::No *_${DEB_ARCH}.deb on ${REPO}@${TAG} — skipping the ${ARCH} Flatpak. Add 'deb' to the release pipeline's linux_bundles input if you want one."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP"
+          SHA=$(sha256sum "${RUNNER_TEMP}/${ASSET}" | cut -d' ' -f1)
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "path=${RUNNER_TEMP}/${ASSET}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/${REPO}/releases/download/${TAG}/${ASSET}" >> "$GITHUB_OUTPUT"
+          echo "Using $ASSET ($SHA)"
+
+      - name: Install flatpak toolchain
+        if: steps.deb.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder appstream
+          flatpak remote-add --if-not-exists --user flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install the GNOME runtime
+        if: steps.deb.outputs.found == 'true'
+        env:
+          RUNTIME: ${{ inputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          if ! flatpak install -y --user flathub \
+              "org.gnome.Platform//${RUNTIME}" "org.gnome.Sdk//${RUNTIME}"; then
+            echo "::error::Could not install org.gnome.Platform//${RUNTIME} — that branch may be retired. Check https://flathub.org/apps/org.gnome.Platform and set the runtime_version input to a live branch."
+            exit 1
+          fi
+
+      # AppStream metadata is what makes the app appear in GNOME Software /
+      # KDE Discover with a name, description and screenshots. Flathub rejects
+      # submissions without it, so generate a valid-but-minimal one rather than
+      # silently shipping a nameless entry.
+      - name: Stage AppStream metainfo
+        id: meta
+        if: steps.deb.outputs.found == 'true'
+        env:
+          METAINFO: ${{ inputs.metainfo }}
+          APP_ID: ${{ inputs.app_id }}
+          PRODUCT: ${{ inputs.product_name }}
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/${APP_ID}.metainfo.xml"
+          if [ -n "${METAINFO:-}" ]; then
+            if [ ! -f "$METAINFO" ]; then
+              echo "::error::metainfo input points at '${METAINFO}', which does not exist in the repository"
+              exit 1
+            fi
+            cp "$METAINFO" "$OUT"
+          else
+            echo "::warning::No metainfo input — generating a placeholder. It builds and installs, but Flathub review WILL reject it: a real one needs a summary, description, screenshots, a license and release notes. Start from templates/flatpak.metainfo.xml."
+            cat > "$OUT" <<XML
+          <?xml version="1.0" encoding="UTF-8"?>
+          <component type="desktop-application">
+            <id>${APP_ID}</id>
+            <launchable type="desktop-id">${APP_ID}.desktop</launchable>
+            <name>${PRODUCT}</name>
+            <summary>${PRODUCT}</summary>
+            <metadata_license>CC0-1.0</metadata_license>
+            <project_license>LicenseRef-proprietary</project_license>
+            <description><p>${PRODUCT}</p></description>
+            <content_rating type="oars-1.1"/>
+            <releases>
+              <release version="${VERSION}" date="$(date -u +%Y-%m-%d)"/>
+            </releases>
+          </component>
+          XML
+          fi
+          # Validation is advisory: appstreamcli's strictness varies by
+          # version and a warning here must not sink a release.
+          appstreamcli validate --no-net "$OUT" || \
+            echo "::warning::appstreamcli reported problems in the metainfo (above). Flathub runs the same check — fix them before submitting."
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Generate the flatpak manifest
+        id: manifest
+        if: steps.deb.outputs.found == 'true'
+        env:
+          TEMPLATE: ${{ inputs.manifest_template }}
+          APP_ID: ${{ inputs.app_id }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          DEB_URL: ${{ steps.deb.outputs.url }}
+          DEB_SHA256: ${{ steps.deb.outputs.sha256 }}
+          DEB_PATH: ${{ steps.deb.outputs.path }}
+          ARCH: ${{ matrix.arch }}
+          RUNTIME: ${{ inputs.runtime_version }}
+          TRAY_ICON: ${{ inputs.tray_icon }}
+          EXTRA_FINISH_ARGS: ${{ inputs.extra_finish_args }}
+          METAINFO_PATH: ${{ steps.meta.outputs.path }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/flatpak"
+          mkdir -p "$WORK"
+          cp "$METAINFO_PATH" "${WORK}/metainfo.xml"
+          MANIFEST="${WORK}/${APP_ID}.yml"
+
+          if [ -n "${TEMPLATE:-}" ]; then
+            if [ ! -f "$TEMPLATE" ]; then
+              echo "::error::manifest_template points at '${TEMPLATE}', which does not exist in the repository"
+              exit 1
+            fi
+            sed -e "s|@APP_ID@|${APP_ID}|g" \
+                -e "s|@VERSION@|${VERSION}|g" \
+                -e "s|@DEB_URL@|${DEB_URL}|g" \
+                -e "s|@DEB_SHA256@|${DEB_SHA256}|g" \
+                -e "s|@ARCH@|${ARCH}|g" \
+                -e "s|@RUNTIME_VERSION@|${RUNTIME}|g" \
+                "$TEMPLATE" > "$MANIFEST"
+            echo "path=$MANIFEST" >> "$GITHUB_OUTPUT"
+            echo "workdir=$WORK" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # finish-args: the four below are the minimum a Tauri window needs.
+          # Wayland plus an X11 fallback covers every current desktop; --device=dri
+          # gives the webview GPU access; --share=ipc is required for the
+          # X11 fallback to be usable at all.
+          {
+            printf 'app-id: %s\n' "$APP_ID"
+            printf 'runtime: org.gnome.Platform\n'
+            printf "runtime-version: '%s'\n" "$RUNTIME"
+            printf 'sdk: org.gnome.Sdk\n'
+            printf 'command: @BINARY@\n'
+            printf 'finish-args:\n'
+            printf '  - --socket=wayland\n'
+            printf '  - --socket=fallback-x11\n'
+            printf '  - --share=ipc\n'
+            printf '  - --device=dri\n'
+            if [ "$TRAY_ICON" = "true" ]; then
+              printf '  - --talk-name=org.kde.StatusNotifierWatcher\n'
+              printf '  - --filesystem=xdg-run/tray-icon:create\n'
+            fi
+            if [ -n "${EXTRA_FINISH_ARGS:-}" ]; then
+              printf '%s\n' "$EXTRA_FINISH_ARGS" | sed '/^[[:space:]]*$/d;s/^[[:space:]]*/  - /'
+            fi
+            printf 'modules:\n'
+            printf '  - name: app\n'
+            printf '    buildsystem: simple\n'
+            printf '    sources:\n'
+            printf '      - type: file\n'
+            printf '        path: metainfo.xml\n'
+            printf '      - type: file\n'
+            printf '        url: %s\n' "$DEB_URL"
+            printf '        sha256: %s\n' "$DEB_SHA256"
+            printf '        dest-filename: app.deb\n'
+            printf '        only-arches: [%s]\n' "$ARCH"
+            printf '    build-commands:\n'
+            # One shell script, not a list of hardcoded install lines: the
+            # names inside a Tauri .deb follow productName/mainBinaryName and
+            # differ per app, and a hardcoded path that misses fails the build
+            # with a bare "No such file" hours into a release.
+            printf '      - |\n'
+            sed 's/^/        /' <<'SH'
+          set -eux
+          mkdir -p extract
+          ar -x app.deb --output extract
+          tar -C extract -xf extract/data.tar.*
+          BIN=$(find extract/usr/bin -maxdepth 1 -type f | head -1)
+          [ -n "$BIN" ] || { echo "no executable in usr/bin of the .deb"; exit 1; }
+          BINARY=$(basename "$BIN")
+          install -Dm755 "$BIN" "/app/bin/$BINARY"
+          # Bundled resources/sidecars, when the app ships any.
+          if [ -d "extract/usr/lib" ]; then
+            mkdir -p /app/lib
+            cp -r extract/usr/lib/. /app/lib/
+            find /app/lib -type f -exec chmod 644 {} +
+            find /app/lib -type f -name '*.so*' -exec chmod 755 {} +
+          fi
+          # The desktop file must be named after the app id, and its Icon= key
+          # must point at the app id too, or the desktop shows a blank tile.
+          DESKTOP=$(find extract/usr/share/applications -name '*.desktop' | head -1)
+          [ -n "$DESKTOP" ] || { echo "no .desktop file in the .deb"; exit 1; }
+          sed -i "s/^Icon=.*/Icon=@APP_ID@/" "$DESKTOP"
+          install -Dm644 "$DESKTOP" "/app/share/applications/@APP_ID@.desktop"
+          # Icons are renamed to the app id for the same reason.
+          for icon in $(find extract/usr/share/icons -type f 2>/dev/null); do
+            rel=${icon#extract/usr/share/icons/}
+            dir=$(dirname "$rel")
+            ext=${icon##*.}
+            install -Dm644 "$icon" "/app/share/icons/$dir/@APP_ID@.$ext"
+          done
+          install -Dm644 metainfo.xml "/app/share/metainfo/@APP_ID@.metainfo.xml"
+          SH
+          } > "$MANIFEST"
+
+          # `command:` needs the real executable name. Only the .deb knows it
+          # (Tauri derives it from mainBinaryName, which need not match
+          # productName), so read it from the package instead of making the
+          # caller repeat a value that can silently drift.
+          BINARY=$(dpkg-deb -c "$DEB_PATH" | grep -oE '\./usr/bin/[^ /]+$' | head -1 | xargs -r basename)
+          if [ -z "${BINARY:-}" ]; then
+            echo "::error::No executable under usr/bin in ${DEB_PATH} — this does not look like a Tauri .deb"
+            exit 1
+          fi
+          sed -i "s|@BINARY@|${BINARY}|g; s|@APP_ID@|${APP_ID}|g" "$MANIFEST"
+          echo "Manifest for ${APP_ID} (command: ${BINARY}):"
+          cat "$MANIFEST"
+          echo "path=$MANIFEST" >> "$GITHUB_OUTPUT"
+          echo "workdir=$WORK" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Flatpak
+        id: build
+        if: steps.deb.outputs.found == 'true'
+        working-directory: ${{ steps.manifest.outputs.workdir }}
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          MANIFEST: ${{ steps.manifest.outputs.path }}
+          VERSION: ${{ steps.rel.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          flatpak-builder --force-clean --user --disable-cache \
+            --repo=repo build-dir "$MANIFEST"
+          BUNDLE="${APP_ID}-${VERSION}-${ARCH}.flatpak"
+          flatpak build-bundle repo "$BUNDLE" "$APP_ID"
+          echo "bundle=$(pwd)/${BUNDLE}" >> "$GITHUB_OUTPUT"
+          echo "name=${BUNDLE}" >> "$GITHUB_OUTPUT"
+          ls -lh "$BUNDLE"
+
+      # Installing the bundle proves the manifest produces something a user's
+      # machine will actually accept — a manifest can build cleanly and still
+      # install nothing usable (missing desktop file, wrong app id).
+      - name: Smoke-test the bundle
+        if: steps.deb.outputs.found == 'true'
+        env:
+          APP_ID: ${{ inputs.app_id }}
+          BUNDLE: ${{ steps.build.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          flatpak install -y --user --bundle "$BUNDLE"
+          flatpak info "$APP_ID"
+          # No display on a runner, so the app cannot be launched — assert on
+          # the installed layout instead.
+          flatpak run --command=sh "$APP_ID" -c 'ls /app/bin' || {
+            echo "::error::The installed Flatpak has no runnable /app/bin content"
+            exit 1
+          }
+          flatpak uninstall -y --user "$APP_ID"
+
+      - name: Attach the bundle to the release
+        if: steps.deb.outputs.found == 'true' && inputs.attach_to_release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          REPO: ${{ steps.rel.outputs.repo }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          BUNDLE: ${{ steps.build.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          # --clobber so a re-run replaces the asset instead of 422-ing.
+          gh release upload "$TAG" "$BUNDLE" --repo "$REPO" --clobber
+
+      # The manifest is the thing you actually submit to Flathub, so keep it
+      # even when nothing was attached to the release.
+      - name: Upload the manifest as a workflow artifact
+        if: always() && steps.manifest.outputs.path != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-manifest-${{ matrix.arch }}
+          path: |
+            ${{ steps.manifest.outputs.path }}
+            ${{ steps.meta.outputs.path }}
+          if-no-files-found: warn
+          retention-days: 30

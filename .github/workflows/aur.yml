@@ -1,0 +1,357 @@
+# Reusable AUR workflow: publishes a `-bin` package to the Arch User
+# Repository from the .deb files this kit's release pipeline already
+# published, validating the PKGBUILD in a real Arch container before it is
+# pushed anywhere.
+#
+# WHY `-bin` FROM THE .deb: a from-source AUR package rebuilds the whole app on
+# every user's machine and needs the full node+cargo toolchain in
+# `makedepends`. Repacking the released .deb gives Arch users the exact binary
+# everyone else got, installs in seconds, and cannot drift from the release.
+# The naming convention is not optional — Arch requires prebuilt packages to
+# carry the `-bin` suffix.
+#
+# Run it AFTER release.yml has published the release (`needs: release` in the
+# caller): it downloads published assets and hashes them.
+#
+# GRACEFUL DEGRADATION: no SSH key, or `dry_run: true`, still renders and
+# VALIDATES the PKGBUILD (checksums, sources, .SRCINFO, namcap) and uploads it
+# as an artifact — it just does not push. That is the recommended way to run
+# this the first few times.
+
+name: AUR (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pkgname:
+        description: >-
+          Exact AUR package name, INCLUDING the `-bin` suffix Arch requires for
+          prebuilt binaries (e.g. `myapp-bin`). The AUR repository of this name
+          is created by the first push.
+        required: true
+        type: string
+      pkgdesc:
+        description: 'One-line description shown on the AUR package page'
+        required: true
+        type: string
+      url:
+        description: 'Project homepage'
+        required: true
+        type: string
+      license:
+        description: >-
+          SPDX license identifier(s), comma-separated (e.g. MIT, or
+          `LicenseRef-proprietary` for a closed-source app).
+        required: false
+        type: string
+        default: 'MIT'
+      tag:
+        description: 'Release tag to package (vX.Y.Z). Defaults to the pushed tag ref.'
+        required: false
+        type: string
+        default: ''
+      releases_repo:
+        description: "'owner/name' hosting the release assets. Empty = this repo."
+        required: false
+        type: string
+        default: ''
+      arches:
+        description: >-
+          Comma-separated architectures (subset of: x86_64, aarch64). Each
+          needs a matching .deb on the release; a missing one is dropped with a
+          warning rather than failing the package.
+        required: false
+        type: string
+        default: 'x86_64,aarch64'
+      depends:
+        description: >-
+          Space-separated runtime dependencies. The default is the set every
+          Tauri v2 app needs; add to it only if your app links something extra.
+        required: false
+        type: string
+        default: "cairo desktop-file-utils gdk-pixbuf2 glib2 gtk3 hicolor-icon-theme libsoup3 pango webkit2gtk-4.1"
+      conflicts:
+        description: 'Space-separated conflicting packages (usually the from-source variant of this app)'
+        required: false
+        type: string
+        default: ''
+      provides:
+        description: >-
+          Space-separated virtual packages this one satisfies. A `-bin` package
+          normally provides the un-suffixed name, so anything depending on
+          `myapp` is satisfied by `myapp-bin`.
+        required: false
+        type: string
+        default: ''
+      maintainer:
+        description: "PKGBUILD `# Maintainer:` line, e.g. 'Jane Doe <jane@example.com>'"
+        required: false
+        type: string
+        default: ''
+      pkgrel:
+        description: 'Arch package release number. Bump it when the packaging changes but the app version does not.'
+        required: false
+        type: string
+        default: '1'
+      dry_run:
+        description: 'Render and validate the PKGBUILD but do not push to the AUR'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AUR_SSH_PRIVATE_KEY:
+        description: >-
+          Private SSH key whose public half is registered on your
+          aur.archlinux.org account. Absent = validate-only, with a warning.
+        required: false
+      RELEASES_TOKEN:
+        description: 'Fine-grained PAT with Contents:Read on releases_repo, when that repo is private'
+        required: false
+
+jobs:
+  aur:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve release
+        id: rel
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASES_REPO: ${{ inputs.releases_repo }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-${GITHUB_REF#refs/tags/}}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::'$TAG' is not a semver release tag — pass the tag input explicitly when not running on a tag push"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          # Arch forbids '-' in pkgver (it separates pkgver from pkgrel), so a
+          # prerelease tag maps to the underscore form Arch uses: 1.0.0-beta.1
+          # becomes 1.0.0_beta.1, which still sorts correctly under vercmp.
+          PKGVER="${VERSION//-/_}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
+          echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
+      # Sources and checksums come from the published release, so the PKGBUILD
+      # is byte-accurate by construction rather than by hand-editing.
+      - name: Collect .deb assets
+        id: assets
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          REPO: ${{ steps.rel.outputs.repo }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          ARCHES: ${{ inputs.arches }}
+        run: |
+          set -euo pipefail
+          ARCH_LIST=$(printf '%s' "$ARCHES" | tr -d '[:space:]' | tr ',' ' ')
+          FOUND=""
+          : > "${RUNNER_TEMP}/sources.env"
+          for ARCH in $ARCH_LIST; do
+            case "$ARCH" in
+              x86_64)  DEB_ARCH=amd64 ;;
+              aarch64) DEB_ARCH=arm64 ;;
+              *) echo "::error::Unsupported architecture '$ARCH' (allowed: x86_64, aarch64)"; exit 1 ;;
+            esac
+            ASSET=$(gh release view "$TAG" --repo "$REPO" --json assets \
+              --jq ".assets[].name | select(endswith(\"_${DEB_ARCH}.deb\"))" | head -1)
+            if [ -z "$ASSET" ]; then
+              echo "::warning::No *_${DEB_ARCH}.deb on ${REPO}@${TAG} — dropping ${ARCH} from the AUR package"
+              continue
+            fi
+            gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP" --clobber
+            SHA=$(sha256sum "${RUNNER_TEMP}/${ASSET}" | cut -d' ' -f1)
+            {
+              echo "ASSET_${ARCH}=${ASSET}"
+              echo "SHA_${ARCH}=${SHA}"
+            } >> "${RUNNER_TEMP}/sources.env"
+            FOUND="${FOUND} ${ARCH}"
+            echo "${ARCH}: ${ASSET} (${SHA})"
+          done
+          FOUND=$(printf '%s' "$FOUND" | sed 's/^ //')
+          if [ -z "$FOUND" ]; then
+            echo "::error::No .deb assets found on ${REPO}@${TAG} for any requested architecture. Add 'deb' to the release pipeline's linux_bundles input."
+            exit 1
+          fi
+          echo "arches=$FOUND" >> "$GITHUB_OUTPUT"
+
+      - name: Render PKGBUILD
+        id: render
+        env:
+          PKGNAME: ${{ inputs.pkgname }}
+          PKGDESC: ${{ inputs.pkgdesc }}
+          PKGVER: ${{ steps.rel.outputs.pkgver }}
+          PKGREL: ${{ inputs.pkgrel }}
+          TAG: ${{ steps.rel.outputs.tag }}
+          URL: ${{ inputs.url }}
+          LICENSE: ${{ inputs.license }}
+          DEPENDS: ${{ inputs.depends }}
+          CONFLICTS: ${{ inputs.conflicts }}
+          PROVIDES: ${{ inputs.provides }}
+          MAINTAINER: ${{ inputs.maintainer }}
+          FOUND_ARCHES: ${{ steps.assets.outputs.arches }}
+          REPO: ${{ steps.rel.outputs.repo }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . "${RUNNER_TEMP}/sources.env"
+          WORK="${RUNNER_TEMP}/aur"
+          mkdir -p "$WORK"
+
+          quote_list() { for w in $1; do printf "'%s' " "$w"; done; }
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+          {
+            if [ -n "${MAINTAINER:-}" ]; then printf '# Maintainer: %s\n' "$MAINTAINER"; fi
+            printf '# Generated by tauri-release-kit. Edits here are overwritten on the next release.\n\n'
+            printf 'pkgname=%s\n' "$PKGNAME"
+            printf 'pkgver=%s\n' "$PKGVER"
+            printf 'pkgrel=%s\n' "$PKGREL"
+            printf 'pkgdesc="%s"\n' "$PKGDESC"
+            printf 'arch=(%s)\n' "$(quote_list "$FOUND_ARCHES")"
+            printf 'url="%s"\n' "$URL"
+            printf 'license=(%s)\n' "$(quote_list "$(printf '%s' "$LICENSE" | tr ',' ' ')")"
+            printf 'depends=(%s)\n' "$(quote_list "$DEPENDS")"
+            if [ -n "${PROVIDES:-}" ];  then printf 'provides=(%s)\n'  "$(quote_list "$PROVIDES")"; fi
+            if [ -n "${CONFLICTS:-}" ]; then printf 'conflicts=(%s)\n' "$(quote_list "$CONFLICTS")"; fi
+            # !strip: the binary is already stripped and re-stripping a
+            # release build wastes time; !debug: there is no source to attach
+            # debug symbols to in a -bin package, and without this makepkg
+            # tries to build an empty -debug package and fails.
+            printf "options=('!strip' '!debug')\n"
+            printf 'install=%s.install\n' "$PKGNAME"
+            for ARCH in $FOUND_ARCHES; do
+              eval "ASSET=\${ASSET_${ARCH}}"
+              eval "SHA=\${SHA_${ARCH}}"
+              # ${pkgname}-${pkgver}.deb::<url> renames the download so two
+              # versions never collide in makepkg's shared source cache.
+              printf 'source_%s=("%s-%s-%s.deb::%s/%s")\n' \
+                "$ARCH" "$PKGNAME" "$PKGVER" "$ARCH" "$BASE_URL" "$ASSET"
+              printf "sha256sums_%s=('%s')\n" "$ARCH" "$SHA"
+            done
+            printf '\npackage() {\n'
+            printf '  # The .deb layout maps 1:1 onto $pkgdir; nothing needs rewriting.\n'
+            printf '  tar -xf data.tar.* -C "${pkgdir}"\n'
+            printf '}\n'
+          } > "${WORK}/PKGBUILD"
+
+          # The .install scriptlet refreshes the icon and desktop-entry caches.
+          # Without it the app installs but does not appear in the launcher
+          # until something else happens to refresh them.
+          cat > "${WORK}/${PKGNAME}.install" <<'INSTALL'
+          post_install() {
+            gtk-update-icon-cache -q -t -f usr/share/icons/hicolor
+            update-desktop-database -q
+          }
+
+          post_upgrade() {
+            post_install
+          }
+
+          post_remove() {
+            post_install
+          }
+          INSTALL
+
+          echo "--- PKGBUILD ---"
+          cat "${WORK}/PKGBUILD"
+          echo "workdir=$WORK" >> "$GITHUB_OUTPUT"
+
+      # Validate in a real Arch container. makepkg refuses to run as root, so
+      # the package files are handed to an unprivileged user — the same
+      # constraint every AUR contributor hits locally.
+      #
+      # --verifysource re-downloads every source URL and checks it against the
+      # sha256sums: it catches a wrong URL or a stale checksum HERE, instead of
+      # in the inbox of every Arch user whose update just failed.
+      - name: Validate in an Arch container
+        env:
+          WORK: ${{ steps.render.outputs.workdir }}
+          PKGNAME: ${{ inputs.pkgname }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${WORK}:/pkg" archlinux:base-devel bash -euo pipefail -c '
+            pacman -Sy --noconfirm --needed pacman-contrib namcap >/dev/null 2>&1 || true
+            useradd -m builder
+            cp -r /pkg /home/builder/pkg
+            chown -R builder:builder /home/builder/pkg
+            cd /home/builder/pkg
+            su builder -c "makepkg --printsrcinfo > .SRCINFO"
+            echo "--- .SRCINFO ---"
+            cat .SRCINFO
+            su builder -c "makepkg --verifysource --noconfirm" || {
+              echo "::error::makepkg could not verify the sources. The release assets must be publicly downloadable — the AUR builds on every user machine, so a private releases repo cannot back an AUR package."
+              exit 1
+            }
+            echo "sources verified against sha256sums"
+            # namcap is advisory: it flags style issues that are not release
+            # blockers, and its rules change between versions.
+            su builder -c "namcap PKGBUILD" || echo "::warning::namcap reported PKGBUILD issues (above)"
+            cp .SRCINFO /pkg/.SRCINFO
+          '
+          test -s "${WORK}/.SRCINFO" || { echo "::error::.SRCINFO was not produced"; exit 1; }
+
+      - name: Push to the AUR
+        id: push
+        if: ${{ !inputs.dry_run }}
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          WORK: ${{ steps.render.outputs.workdir }}
+          PKGNAME: ${{ inputs.pkgname }}
+          PKGVER: ${{ steps.rel.outputs.pkgver }}
+          MAINTAINER: ${{ inputs.maintainer }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::warning::AUR_SSH_PRIVATE_KEY not set — the PKGBUILD was rendered and validated but not published. Add the secret (public half registered at aur.archlinux.org) to publish."
+            exit 0
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t rsa,ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+          # An AUR repository that does not exist yet is created by this push,
+          # so a first release needs no manual setup beyond the SSH key.
+          if ! git clone "ssh://aur@aur.archlinux.org/${PKGNAME}.git" aur-repo 2>"${RUNNER_TEMP}/clone.log"; then
+            if grep -qi 'permission denied' "${RUNNER_TEMP}/clone.log"; then
+              echo "::error::AUR rejected the SSH key. Register its public half at https://aur.archlinux.org/account/ (Account → SSH Public Key)."
+              cat "${RUNNER_TEMP}/clone.log"
+              exit 1
+            fi
+            echo "No AUR repository for ${PKGNAME} yet — the first push creates it."
+            mkdir aur-repo && git -C aur-repo init -q -b master
+            git -C aur-repo remote add origin "ssh://aur@aur.archlinux.org/${PKGNAME}.git"
+          fi
+
+          cp "${WORK}/PKGBUILD" "${WORK}/.SRCINFO" "${WORK}/${PKGNAME}.install" aur-repo/
+          cd aur-repo
+          # AUR rejects pushes containing anything but package files.
+          git add PKGBUILD .SRCINFO "${PKGNAME}.install"
+          if git diff --cached --quiet; then
+            echo "Package unchanged — nothing to push."
+            exit 0
+          fi
+          # git refuses to commit without an identity, so fall back when the
+          # maintainer input is empty or not in "Name <email>" form.
+          NAME=$(printf '%s' "$MAINTAINER" | sed -n 's/^\(.*[^[:space:]]\)[[:space:]]*<.*/\1/p')
+          EMAIL=$(printf '%s' "$MAINTAINER" | sed -n 's/.*<\(.*\)>.*/\1/p')
+          git config user.name  "${NAME:-release-kit-bot}"
+          git config user.email "${EMAIL:-releases@users.noreply.github.com}"
+          git commit -q -m "${PKGNAME} ${PKGVER}"
+          git push origin HEAD:master
+          echo "::notice::Published ${PKGNAME} ${PKGVER} to https://aur.archlinux.org/packages/${PKGNAME}"
+
+      - name: Upload the package files as a workflow artifact
+        if: always() && steps.render.outputs.workdir != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: aur-${{ inputs.pkgname }}
+          path: |
+            ${{ steps.render.outputs.workdir }}/PKGBUILD
+            ${{ steps.render.outputs.workdir }}/.SRCINFO
+            ${{ steps.render.outputs.workdir }}/${{ inputs.pkgname }}.install
+          if-no-files-found: warn
+          retention-days: 30

@@ -12,7 +12,7 @@ breaks (feature-gated deps, windows-crate API moves, doc lints inside
 | linux x64          | `linux-amd64`    | opt-in via `--only` — see note below       |
 | windows x64        | `windows-x64`    | docker cargo-xwin (clang-cl + MSVC SDK)    |
 | windows arm64      | `windows-arm64`  | opt-in via `--only` — see note below       |
-| linux full bundle  | `linux-bundle`   | `--full` only; clean clone of HEAD         |
+| linux full bundle  | `linux-bundle`   | `--full` only; clean clone of HEAD; deb/rpm/AppImage (`PF_LINUX_BUNDLES`) |
 
 The default set (fmt + mac + linux-arm64 + windows-x64) compiles every
 first-party `#[cfg]` path — a doc lint or feature-gate break in your own code
@@ -27,10 +27,11 @@ arch-specific code in third-party crates, which CI's native legs still gate:
   `.S` assembly, and the GNU driver can't resolve the lowercased xwin SDK's
   `Windows.h` on a case-sensitive filesystem.
 
-Not covered (still CI-only): NSIS/MSI bundling, macOS signing/notarization,
-Windows linking (clippy stops before link), and anything runner-image
-specific — treat a green preflight as "the compile/lint gates will pass",
-not "the release will succeed".
+Not covered (still CI-only): NSIS/MSI bundling, code signing on any platform
+(macOS notarization, Windows Authenticode, Linux GPG), Windows linking (clippy
+stops before link), the App Store / Flatpak / AUR channels, and anything
+runner-image specific — treat a green preflight as "the compile/lint gates
+will pass", not "the release will succeed".
 
 ## Consuming from an app repo
 

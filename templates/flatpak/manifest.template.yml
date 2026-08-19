@@ -1,0 +1,59 @@
+# Escape-hatch flatpak-builder manifest for the flatpak.yml workflow.
+# Point the workflow's `manifest_template` input at a copy of this file.
+#
+# The workflow substitutes these placeholders before building:
+#   @APP_ID@  @VERSION@  @DEB_URL@  @DEB_SHA256@  @ARCH@  @RUNTIME_VERSION@
+# and places `metainfo.xml` next to the manifest.
+app-id: '@APP_ID@'
+
+runtime: org.gnome.Platform
+runtime-version: '@RUNTIME_VERSION@'
+sdk: org.gnome.Sdk
+
+# The executable name inside the .deb — Tauri derives it from mainBinaryName,
+# which need not match productName.
+command: myapp
+
+finish-args:
+  # A window needs Wayland, an X11 fallback, and IPC for that fallback.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # The webview's GPU acceleration.
+  - --device=dri
+  # Add only what the app genuinely needs — each one is reviewed on Flathub.
+  # - --share=network
+  # - --talk-name=org.kde.StatusNotifierWatcher   # tray icon
+  # - --filesystem=xdg-run/tray-icon:create       # tray icon
+  # Uncomment if the webview renders black under Wayland compositing.
+  # - --env=WEBKIT_DISABLE_COMPOSITING_MODE=1
+
+modules:
+  - name: app
+    buildsystem: simple
+    sources:
+      - type: file
+        path: metainfo.xml
+      - type: file
+        url: '@DEB_URL@'
+        sha256: '@DEB_SHA256@'
+        dest-filename: app.deb
+        only-arches: ['@ARCH@']
+    build-commands:
+      - |
+        set -eux
+        mkdir -p extract
+        ar -x app.deb --output extract
+        tar -C extract -xf extract/data.tar.*
+        install -Dm755 extract/usr/bin/myapp /app/bin/myapp
+        # The desktop file and icons must be named after the app id, or the
+        # desktop shows the app with a blank tile.
+        sed -i "s/^Icon=.*/Icon=@APP_ID@/" extract/usr/share/applications/*.desktop
+        install -Dm644 extract/usr/share/applications/*.desktop \
+          /app/share/applications/@APP_ID@.desktop
+        for size in 32x32 128x128 256x256@2; do
+          src=$(ls extract/usr/share/icons/hicolor/$size/apps/*.png 2>/dev/null | head -1) || true
+          [ -n "${src:-}" ] && install -Dm644 "$src" \
+            "/app/share/icons/hicolor/$size/apps/@APP_ID@.png"
+        done
+        install -Dm644 metainfo.xml /app/share/metainfo/@APP_ID@.metainfo.xml

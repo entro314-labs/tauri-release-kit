@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the Info.plist Tauri generates. Do NOT set keys Tauri
+	     already owns (CFBundleVersion, CFBundleShortVersionString,
+	     CFBundleIdentifier) — a conflicting value here silently wins and
+	     desynchronizes the app from the updater manifest. -->
+
+	<!-- Required by App Store Connect. `false` means "uses only exempt
+	     encryption" (HTTPS is exempt); set `true` and file the annual
+	     self-classification report if your app encrypts anything itself. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!-- Delete every usage string your app does not need. -->
+	<!--
+	<key>NSCameraUsageDescription</key>
+	<string>Explain why the app needs the camera.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Explain why the app needs the microphone.</string>
+	-->
+</dict>
+</plist>
