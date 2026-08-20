@@ -174,6 +174,19 @@ re-read this first.
   only needed when you want the app-repo tag to point at the fixed commit.
   A tag whose release already went PUBLIC is never reused — bump instead.
 
+- **The rolling `latest-<channel>` releases create git tags, and a version
+  tool that reads "the last tag" will pick one up.** `repos.createRelease`
+  with a `tag_name` that does not exist creates the tag, so `latest-alpha`
+  and `latest-beta` become real tags on the releases repo — which IS the app
+  repo whenever `releases_repo` is unset. They then sit at the tip of the
+  default branch, ahead of the last real `vX.Y.Z`. Any tool asking git for
+  the nearest tag gets `latest-beta` and computes the wrong commit range:
+  release-kit ≤2.8.0 aborted with "no releasable commits since latest-beta",
+  hiding every commit since the actual last release. Fixed there by
+  resolving the highest *version* tag carrying the configured prefix rather
+  than the nearest tag of any kind. If you script anything else against
+  `git describe`, pass `--match 'v*'`.
+
 - **GitHub billing kills runs with a misleading annotation** ("job was not
   started ... spending limit") on the first job. macOS runners bill 10× on
   private repos; six release attempts ≈ $15. Keep gate failures cheap by
