@@ -1,0 +1,68 @@
+# Reusable commit gate for Tauri apps released from a CHANGELOG.
+#
+# The release workflow builds its release body — and every consumer's update-manifest
+# `notes` — out of the tag's CHANGELOG section, and that changelog is written from commit
+# subjects. A subject that is not Conventional Commits contributes nothing to it, and the
+# release still succeeds, so the work simply goes missing.
+#
+# Local commit-msg hooks cannot close this: they are bypassable with --no-verify, and they
+# never see the subject that matters most. A squash merge takes its subject from the pull
+# request title, which becomes the commit the changelog is derived from.
+#
+# The check is release-kit's own `lint-commits`, so the gate and the tool that writes the
+# changelog read one grammar rather than two that can drift apart.
+
+name: Commit lint (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      release_kit_version:
+        description: >-
+          Version of @entro314labs/release-kit to run. Pinned rather than floating: a
+          linter that changes under you turns an unrelated pull request red.
+        required: false
+        type: string
+        default: '2.8.0'
+      lint_branch_commits:
+        description: >-
+          Also check every commit on the branch, not just the title. Leave off for a
+          squash-merge repository, where only the title becomes a commit.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  commits:
+    name: Commit lint
+    runs-on: ubuntu-latest
+    # A pull request is the only event carrying a title to check. On a push there is
+    # nothing to gate that has not already landed.
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the branch range needs both endpoints
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The title reaches the shell through env, never through ${{ }} interpolation: on a
+      # fork's pull request it is attacker-controlled text.
+      - name: Lint the pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          KIT: ${{ inputs.release_kit_version }}
+        run: npx --yes "@entro314labs/release-kit@$KIT" lint-commits --subject "$TITLE"
+
+      - name: Lint the commits on the branch
+        if: inputs.lint_branch_commits
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+          KIT: ${{ inputs.release_kit_version }}
+        run: npx --yes "@entro314labs/release-kit@$KIT" lint-commits "$RANGE"
