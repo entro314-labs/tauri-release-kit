@@ -147,7 +147,7 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
        "apps/desktop/src-tauri/Cargo.lock"
      ],
      "publish": null,
-     "steps": ["version", "changelog", "tag", "push"]
+     "steps": ["commit", "version", "changelog", "tag", "push"]
    }
    ```
 
