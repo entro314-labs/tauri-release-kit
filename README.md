@@ -272,6 +272,19 @@ Rules learned running the kit's consumers this way:
 - **Accept the reproducibility trade-off**: a hosted image is pristine on
   every run; your mac is not. Toolchain drift on the runner machine becomes
   release-environment drift.
+- **Prepare the machine's toolchain for CROSS builds** (lessons that each
+  cost a failed leg): keep version-manager shims (mise/asdf) OUT of the
+  runner's `.path` — they refuse to resolve in the runner's untrusted work
+  dirs and the Rust setup action then flip-flops; `rustup target add
+  x86_64-apple-darwin` for the pinned toolchain (hosted intel images never
+  needed it; the cross leg does — `can't find crate for core` otherwise);
+  vendor native deps that would need a target-arch system library (e.g.
+  `openssl-sys` `vendored`, scoped under
+  `[target.x86_64-apple-darwin.dependencies]`); and cap parallelism with
+  `CARGO_BUILD_JOBS` in the runner's `.env` — a vendored-OpenSSL `make -j`
+  on top of cargo's full parallelism can exhaust process limits on a
+  machine that is also a desktop (`cc`/`ar` spawn failures, EAGAIN).
+  `.path`/`.env` edits apply on service restart, never mid-job.
 - In your own workflows, select legs by **runner label**, so
   GitHub-image-specific steps (`apt-get`, the `sudo rm -rf` disk-freeing
   step) stay keyed to `ubuntu-latest` and correctly no-op on self-hosted
