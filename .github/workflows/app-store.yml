@@ -84,6 +84,22 @@ on:
         required: false
         type: string
         default: '24'
+      macos_runner:
+        description: >-
+          Runner for the macOS App Store job. Default: the GitHub-hosted
+          macos-15 image (10× billing on private repos). Set a SINGLE
+          self-hosted runner label (e.g. 'macbook') to build on your own mac
+          — the keychain steps below already clean up after themselves on
+          persistent machines. Never on a public repo (fork-PR code
+          execution).
+        required: false
+        type: string
+        default: 'macos-15'
+      ios_runner:
+        description: 'Runner for the iOS job; same rules as macos_runner.'
+        required: false
+        type: string
+        default: 'macos-15'
     secrets:
       # --- App Store Connect API key: the only auth altool accepts, and what
       #     Xcode automatic signing uses for iOS. Required for any upload. ---
@@ -135,7 +151,7 @@ on:
 jobs:
   macos:
     if: inputs.macos
-    runs-on: macos-15
+    runs-on: ${{ inputs.macos_runner }}
     steps:
       # Fail (or skip) before the ~15 minutes of universal-binary compilation,
       # not after.
@@ -439,7 +455,7 @@ jobs:
 
   ios:
     if: inputs.ios
-    runs-on: macos-15
+    runs-on: ${{ inputs.ios_runner }}
     steps:
       - name: Check credentials
         id: prereq

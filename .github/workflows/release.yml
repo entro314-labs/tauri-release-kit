@@ -46,8 +46,9 @@
 # draft, so a partially failed release is retried via workflow_dispatch with
 # `build_targets` set to just the failed legs — assets from successful legs
 # are kept, and only the failed legs' runner minutes are spent again (macOS
-# legs bill 10× on private repos; this is the kit's main cost lever). The
-# `targets` input independently lets an app ship fewer than six platforms.
+# legs bill 10× on private repos; `build_targets` and the macos_*_runner
+# self-hosted overrides are the kit's main cost levers). The `targets` input
+# independently lets an app ship fewer than six platforms.
 
 name: Release (reusable)
 
@@ -77,6 +78,30 @@ on:
         required: false
         type: string
         default: '24'
+      macos_arm_runner:
+        description: >-
+          Runner for the darwin-aarch64 leg. Default: the GitHub-hosted
+          macos-15 image, which bills 10× on private repos. Set a SINGLE
+          self-hosted runner label (e.g. 'macbook') to build this leg on your
+          own Apple Silicon machine for free — read the README's
+          "Self-hosted macOS legs" section first (keychain signing mode,
+          offline-runner behaviour, and NEVER on a public repo whose
+          workflows run for fork PRs).
+        required: false
+        type: string
+        default: 'macos-15'
+      macos_intel_runner:
+        description: >-
+          Runner for the darwin-x86_64 leg. Default: the GitHub-hosted
+          macos-15-intel image. May point at the SAME Apple Silicon label as
+          macos_arm_runner: the leg already builds --target
+          x86_64-apple-darwin, and preflight compiles that target natively on
+          arm64 macs — but the full bundle+notarize path is less proven
+          cross-arch, so smoke-test with a cheap
+          `build_targets: darwin-x86_64` dispatch before a real tag.
+        required: false
+        type: string
+        default: 'macos-15-intel'
       releases_repo:
         description: >-
           'owner/name' of the repo that hosts the GitHub releases (and the
@@ -418,6 +443,8 @@ jobs:
       MACOS_BUNDLES: ${{ inputs.macos_bundles }}
       WINDOWS_BUNDLES: ${{ inputs.windows_bundles }}
       LINUX_BUNDLES: ${{ inputs.linux_bundles }}
+      MACOS_ARM_RUNNER: ${{ inputs.macos_arm_runner }}
+      MACOS_INTEL_RUNNER: ${{ inputs.macos_intel_runner }}
       VERSION: ${{ needs.check-changelog.outputs.version }}
     steps:
       - name: Compute build matrix
@@ -442,6 +469,14 @@ jobs:
             "linux-x86_64":    {"platform":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","os_name":"linux","arch":"x86_64","config":"src-tauri/tauri.linux.conf.json"},
             "linux-aarch64":   {"platform":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","os_name":"linux","arch":"aarch64","config":"src-tauri/tauri.linux.conf.json"}
           }'
+          # The darwin platforms honor the macos_*_runner inputs so the
+          # 10×-billed macOS minutes can move to a self-hosted mac. The other
+          # legs stay GitHub-hosted: Linux/Windows minutes are cheap, and
+          # windows-11-arm has no self-hosted equivalent anyway.
+          LEGS=$(printf '%s' "$LEGS" | jq -c \
+            --arg arm "$MACOS_ARM_RUNNER" --arg intel "$MACOS_INTEL_RUNNER" '
+            .["darwin-aarch64"].platform = $arm |
+            .["darwin-x86_64"].platform  = $intel')
           norm() { printf '%s' "$1" | tr -d '[:space:]' | tr ',' '\n' | sed '/^$/d' | awk '!seen[$0]++'; }
           TARGET_LIST=$(norm "$TARGETS")
           [ -n "$TARGET_LIST" ] || { echo "::error::targets input resolved to an empty set"; exit 1; }

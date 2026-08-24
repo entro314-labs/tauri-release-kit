@@ -23,11 +23,12 @@ encodes a CI failure that actually happened; read
 | --- | --- |
 | `.github/workflows/release.yml` | Tag-triggered release: build → sign → manifest → verify → publish |
 | `.github/workflows/rust-checks.yml` | fmt + clippy (+ tests) on ubuntu/macos/windows for branch pushes |
+| `.github/workflows/commit-lint.yml` | Checks pull request titles are Conventional Commits, so the changelog stays complete |
 | `.github/workflows/flatpak.yml` | Repacks the released `.deb` into a Flatpak bundle + Flathub manifest |
 | `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
 | `.github/workflows/app-store.yml` | Builds and uploads a Mac App Store `.pkg` / iOS `.ipa` |
 
-All five are `workflow_call` reusable workflows — fixes land here once and
+All six are `workflow_call` reusable workflows — fixes land here once and
 every app picks them up. Pin `@main` for latest or a tag for stability. The
 last three chain off `release.yml` with `needs:` in one caller file; see
 [`templates/release.yml`](templates/release.yml).
@@ -56,7 +57,9 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      repos also `releases_repo` + the `RELEASES_TOKEN` secret; for Homebrew,
      `product_name`, `homebrew_tap`, `cask_desc`, `cask_homepage`,
      `bundle_identifier` + the `HOMEBREW_TAP_TOKEN` secret)
-   - `templates/tests.yml` → `.github/workflows/tests.yml`
+   - `templates/tests.yml` → `.github/workflows/tests.yml` (calls the Rust
+     gates and the commit gate; set `lint_branch_commits: true` if you merge
+     without squashing)
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
    - version bumping: either `scripts/version-manager.ts` → `tooling/scripts/`
@@ -220,23 +223,61 @@ layers keep failures cheap, in the order they bite:
    its already-uploaded assets, so a failed leg costs one leg's minutes —
    not a fresh 6-leg matrix with both macOS legs rebuilt.
 
-### Self-hosted runners (consumer test workflows)
+Those layers make failures cheap; when the *successful* runs still cost too
+much, the macOS legs — the whole 10× multiplier — can move to your own
+hardware. See "Self-hosted macOS legs" below.
 
-Per-push test matrices are a good fit for self-hosted runners; two lessons
-from running the kit's consumers that way:
+### Self-hosted macOS legs
 
-- Select legs by **runner label**, so GitHub-image-specific steps (`apt-get`,
-  the `sudo rm -rf` disk-freeing step) stay keyed to `ubuntu-latest` and
-  correctly no-op on self-hosted hardware. Key anything meant to run *once*
-  to the leg (`matrix.platform.name == 'Linux'`) rather than to
-  `ubuntu-latest`, or it silently stops running altogether.
-- This kit's own `release.yml` deliberately stays on GitHub-hosted runners
-  for all six legs: tag-time releases are rare and want pristine,
-  reproducible environments — and the `windows-11-arm` leg has no self-hosted
-  equivalent, since Windows-on-ARM cannot be cross-compiled (cargo-xwin leaks
-  MSVC `/imsvc` flags into the GNU-clang driver `cc-rs` uses for `ring`).
-  Point release builds at self-hosted runners only if you accept a less
-  reproducible release environment.
+Since the macOS legs are the entire 10× multiplier, every workflow with a
+mac leg accepts a runner override so those minutes can move to your own
+Apple Silicon machine while the pipeline itself stays on GitHub Actions:
+
+| Workflow | Input | Covers |
+| --- | --- | --- |
+| `release.yml` | `macos_arm_runner` / `macos_intel_runner` | the two darwin build legs |
+| `rust-checks.yml` | `macos_runner` | the per-push macOS gate |
+| `app-store.yml` | `macos_runner` / `ios_runner` | App Store builds |
+
+Each input takes a **single self-hosted runner label** (e.g. `macbook`) and
+defaults to the GitHub-hosted image. Linux and Windows legs stay hosted —
+their minutes are cheap and `windows-11-arm` has no self-hosted equivalent
+anyway (Windows-on-ARM cannot be cross-compiled: cargo-xwin leaks MSVC
+`/imsvc` flags into the GNU-clang driver `cc-rs` uses for `ring`).
+
+Rules learned running the kit's consumers this way:
+
+- **Private repos only.** `rust-checks.yml` runs on `pull_request`; a
+  self-hosted runner on a public repo executes fork-PR code on your machine.
+  Public repos keep every leg on hosted runners.
+- **Signing without shipping secrets to the laptop**: install the Developer
+  ID certificate in the runner mac's login keychain once and set only
+  `APPLE_SIGNING_IDENTITY` (plus the notarization API key) — the workflow
+  only exports non-empty Apple secrets, so leaving `APPLE_CERTIFICATE`
+  unset skips the import path entirely, exactly like the Windows
+  `WINDOWS_CERTIFICATE_THUMBPRINT` mode. For a headless runner the signing
+  key must be usable without a UI prompt, or codesign hangs until the 6h
+  job timeout: `security set-key-partition-list -S
+  apple-tool:,apple:,codesign: -k <login-pw> login.keychain-db`, and keep
+  the keychain unlocked.
+- **Both darwin legs can name the same arm64 machine** — the intel leg
+  already builds `--target x86_64-apple-darwin` and preflight compiles that
+  target natively on arm64 macs. The full bundle+notarize path is less
+  proven cross-arch, so smoke-test with a cheap
+  `build_targets: darwin-x86_64` dispatch before a real tag.
+- **An offline runner queues, it doesn't fail** — a tag pushed while the mac
+  is asleep leaves the darwin legs pending (GitHub fails them after 24h).
+  The `build_targets` retry lever recovers exactly as for any failed leg:
+  wake the machine, re-dispatch the same tag with just the darwin legs.
+- **Accept the reproducibility trade-off**: a hosted image is pristine on
+  every run; your mac is not. Toolchain drift on the runner machine becomes
+  release-environment drift.
+- In your own workflows, select legs by **runner label**, so
+  GitHub-image-specific steps (`apt-get`, the `sudo rm -rf` disk-freeing
+  step) stay keyed to `ubuntu-latest` and correctly no-op on self-hosted
+  hardware. Key anything meant to run *once* to the leg
+  (`matrix.platform.name == 'Linux'`) rather than to `ubuntu-latest`, or it
+  silently stops running altogether.
 
 ## Docs
 

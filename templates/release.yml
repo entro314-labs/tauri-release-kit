@@ -53,6 +53,15 @@ jobs:
       #     fewer to skip legs you don't ship — each dropped macOS leg saves
       #     10×-billed minutes on every release.
       # targets: 'darwin-aarch64,darwin-x86_64,windows-x86_64,linux-x86_64,linux-aarch64'
+      # --- Self-hosted macOS legs (optional). Point one or both darwin legs
+      #     at a self-hosted runner label to stop paying the 10× macOS rate —
+      #     both may name the same Apple Silicon machine (the intel leg
+      #     cross-builds x86_64-apple-darwin there; smoke-test it with a
+      #     `build_targets: darwin-x86_64` dispatch first). Read the kit
+      #     README's "Self-hosted macOS legs" section before enabling:
+      #     keychain signing mode, offline-runner behaviour, private repos only.
+      # macos_arm_runner: 'macbook'
+      # macos_intel_runner: 'macbook'
       # --- Bundle formats per OS (optional; defaults shown). The formats the
       #     updater needs (app / nsis / appimage) cannot be removed while that
       #     platform ships. `msi` is dropped automatically on prerelease

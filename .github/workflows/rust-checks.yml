@@ -47,13 +47,24 @@ on:
         required: false
         type: string
         default: '24'
+      macos_runner:
+        description: >-
+          Runner for the macOS leg. Default: the GitHub-hosted macos-15 image,
+          which bills 10× on private repos — on EVERY push, since this
+          workflow is the per-push gate. Set a SINGLE self-hosted runner
+          label (e.g. 'macbook') to run it on your own mac for free. NEVER do
+          this on a public repo: this workflow runs on pull_request, and a
+          self-hosted runner there executes fork-PR code on your machine.
+        required: false
+        type: string
+        default: 'macos-15'
 
 jobs:
   rust-checks:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        os: [ubuntu-24.04, '${{ inputs.macos_runner }}', windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

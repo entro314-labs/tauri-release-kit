@@ -1,7 +1,7 @@
-# Thin caller for the shared Rust quality gates. Runs on branch pushes so a
-# release tag never discovers gate failures (macOS-local checks cannot see
+# Thin caller for the shared quality gates. Runs on branch pushes so a release
+# tag never discovers gate failures (macOS-local checks cannot see
 # Linux/Windows diagnostics in cfg-gated code).
-name: Rust checks
+name: Checks
 
 on:
   push:
@@ -19,3 +19,15 @@ jobs:
     with:
       project_path: 'apps/desktop'   # ← '.' for single-app repos
       run_tests: true
+      # --- Run the macOS leg on your own mac instead of the 10×-billed
+      #     hosted image (single self-hosted runner label). PRIVATE repos
+      #     only: this workflow runs on pull_request, and a self-hosted
+      #     runner on a public repo executes fork-PR code on your machine.
+      # macos_runner: 'macbook'
+
+  # Guards the changelog the release body and every update manifest are built from.
+  # Skips itself on pushes: only a pull request carries a title to check.
+  commits:
+    uses: entro314-labs/tauri-release-kit/.github/workflows/commit-lint.yml@main
+    with:
+      lint_branch_commits: false   # ← true if you merge without squashing
