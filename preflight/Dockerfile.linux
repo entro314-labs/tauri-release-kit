@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Preflight image for the Linux release legs: the exact apt set the
 # tauri-release-kit build legs install on ubuntu-24.04 (plus libssl-dev/perl/
 # make, which the GitHub runner image preinstalls but a bare container lacks —
