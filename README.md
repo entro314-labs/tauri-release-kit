@@ -108,7 +108,12 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      `WINDOWS_CERTIFICATE_PASSWORD`), or any issuer CLI via the
      `windows_sign_command` input.
    - **Linux**: `LINUX_GPG_PRIVATE_KEY` (+ `LINUX_GPG_PASSPHRASE`) signs the
-     AppImage and the RPM with one key.
+     AppImage and the RPM with one key; `LINUX_GPG_KEY_ID` picks the key when
+     the keyring holds more than one.
+   - **Build-time extras (optional)**: `SENTRY_DSN` is exported to the build as
+     `SENTRY_DSN` and `VITE_SENTRY_DSN`, and `SENTRY_AUTH_TOKEN` for sourcemap
+     upload tooling — both only when non-empty. Neither is read by the kit
+     itself; they exist for the app's own build to pick up.
 
    Unset secrets are handled safely — the pipeline only exports non-empty
    ones, and each OS's artifacts are verified after the build so signing that

@@ -413,6 +413,34 @@ jobs:
           fi
           echo "Found CHANGELOG entry for ${VERSION}."
 
+      # The updater manifest's version comes from the tag alone. An app whose config
+      # says a different number ships a manifest that is newer than itself and offers
+      # every installed copy an "update" to what it already runs, forever — and
+      # verify-release cannot see it. Tauri lets tauri.conf.json omit `version` and
+      # inherit the crate's, so that is the fallback.
+      - name: Verify the tag matches the app's version
+        env:
+          BARE: ${{ steps.resolved.outputs.BARE }}
+          SRC_TAURI: ${{ inputs.project_path }}/src-tauri
+        run: |
+          set -euo pipefail
+          CONF="${SRC_TAURI}/tauri.conf.json"
+          if [ ! -f "$CONF" ]; then
+            echo "::error::${CONF} not found — check the project_path input"
+            exit 1
+          fi
+          APP_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version") or "")' "$CONF")
+          SOURCE="$CONF"
+          if [ -z "$APP_VERSION" ]; then
+            SOURCE="${SRC_TAURI}/Cargo.toml"
+            APP_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$SOURCE" | head -1)
+          fi
+          if [ "$APP_VERSION" != "$BARE" ]; then
+            echo "::error::Tag ${BARE} does not match ${SOURCE}, which says '${APP_VERSION}'. Bump the config before tagging (release-kit's versionFiles keeps them in step)."
+            exit 1
+          fi
+          echo "${SOURCE} agrees with the tag (${BARE})."
+
   # Formatting is target-independent, so one cheap ubuntu runner settles it for
   # all six legs before the matrix spins up (a real release burned six
   # runners on an import-order diff that each leg's own fmt step then caught).
@@ -448,8 +476,6 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.MATRIX }}
       targets: ${{ steps.plan.outputs.TARGETS }}
-      windows_bundles: ${{ steps.plan.outputs.WINDOWS_BUNDLES }}
-      linux_bundles: ${{ steps.plan.outputs.LINUX_BUNDLES }}
       macos_bundles: ${{ steps.plan.outputs.MACOS_BUNDLES }}
     env:
       TARGETS: ${{ inputs.targets }}

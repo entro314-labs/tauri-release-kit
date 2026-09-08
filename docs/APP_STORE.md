@@ -168,6 +168,12 @@ off when validation passes.
 The `.pkg` is uploaded as a workflow artifact regardless of whether the upload
 succeeded, so a failed upload never means rebuilding a universal binary.
 
+`secrets: inherit` also passes `KEYCHAIN_PASSWORD` if the repository has one: it
+is the password of the throwaway keychain the job builds in. Leave it unset and
+the job generates a random one per run, which is the right default on hosted
+runners; set it only when a self-hosted runner needs the keychain to be
+reopenable between steps.
+
 ## 6. iOS
 
 Set `ios: true`. Two signing paths, chosen automatically by which secrets

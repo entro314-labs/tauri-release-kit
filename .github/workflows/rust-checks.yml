@@ -90,18 +90,19 @@ jobs:
           shared-key: checks-${{ matrix.os }}
           cache-on-failure: true
 
+      # Plain apt-get, NOT a caching action — the rule GOTCHAS.md records after
+      # the cache action reported packages installed while installing none.
       - name: Install Linux dependencies
         if: startsWith(matrix.os, 'ubuntu')
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: >-
-            libwebkit2gtk-4.1-dev
-            libjavascriptcoregtk-4.1-dev
-            libsoup-3.0-dev
-            libgtk-3-dev
-            libayatana-appindicator3-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev
-          version: 1.0
 
       # tauri-build's codegen needs the frontend deps present (beforeBuildCommand
       # is not run for check/clippy, but the tauri config is still parsed).
