@@ -139,10 +139,7 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    {
      "versionFiles": [
        "apps/desktop/package.json",
-       "apps/desktop/src-tauri/tauri.conf.json",
-       "apps/desktop/src-tauri/tauri.macos.conf.json",
-       "apps/desktop/src-tauri/tauri.windows.conf.json",
-       "apps/desktop/src-tauri/tauri.linux.conf.json",
+       "apps/desktop/src-tauri/tauri.*conf.json",
        "apps/desktop/src-tauri/Cargo.toml",
        "apps/desktop/src-tauri/Cargo.lock"
      ],
@@ -155,6 +152,9 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    owns building, signing and the GitHub release. Do NOT add `release` to `steps` — both
    would try to create it and the second fails. `Cargo.lock` is scoped to the crate named
    in the sibling `Cargo.toml`, so the 500-odd dependency versions in it are left alone.
+   The glob covers `tauri.conf.json` and every per-OS overlay beside it; an overlay that
+   carries no `version` of its own is skipped. Do not list the overlays by name — a file
+   named on purpose that has no version to write fails release-kit's preflight.
    What it adds over the script: `## [Unreleased]` is rolled into the version heading the
    changelog guard checks for, the annotated tag carries the release notes, and a
    half-finished run is resumed by re-running it. What it does not do is anything after the

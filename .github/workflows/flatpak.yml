@@ -156,7 +156,7 @@ jobs:
         id: deb
         if: steps.select.outputs.selected == 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
           REPO: ${{ steps.rel.outputs.repo }}
           TAG: ${{ steps.rel.outputs.tag }}
           ARCH: ${{ matrix.arch }}
@@ -365,7 +365,9 @@ jobs:
           # (Tauri derives it from mainBinaryName, which need not match
           # productName), so read it from the package instead of making the
           # caller repeat a value that can silently drift.
-          BINARY=$(dpkg-deb -c "$DEB_PATH" | grep -oE '\./usr/bin/[^ /]+$' | head -1 | xargs -r basename)
+          # `|| true`: under pipefail a grep with no match (or a SIGPIPE from head) fails
+          # the assignment and exits the script before the message below can say why.
+          BINARY=$(dpkg-deb -c "$DEB_PATH" | grep -oE '\./usr/bin/[^ /]+$' | head -1 | xargs -r basename || true)
           if [ -z "${BINARY:-}" ]; then
             echo "::error::No executable under usr/bin in ${DEB_PATH} — this does not look like a Tauri .deb"
             exit 1
@@ -418,7 +420,7 @@ jobs:
       - name: Attach the bundle to the release
         if: steps.deb.outputs.found == 'true' && inputs.attach_to_release
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
           REPO: ${{ steps.rel.outputs.repo }}
           TAG: ${{ steps.rel.outputs.tag }}
           BUNDLE: ${{ steps.build.outputs.bundle }}

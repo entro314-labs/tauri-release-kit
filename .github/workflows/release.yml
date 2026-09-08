@@ -352,6 +352,10 @@ jobs:
       RELEASES_REPO: ${{ inputs.releases_repo }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A dispatch retry names the tag; without this it would build whatever the
+          # default branch is at retry time and attach that beside the tag's assets.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Resolve version
         id: resolved
@@ -361,8 +365,11 @@ jobs:
           else
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
-          if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
-            echo "::error::Version '$VERSION' is not a valid semver tag (expected vX.Y.Z[-suffix])"
+          # Only the two prerelease channels the pipeline has exist: any other suffix
+          # (-rc.1, -next) would fall through the channel switch below to "stable" and
+          # be published as the latest release every stable client updates to.
+          if ! printf '%s' "$VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$'; then
+            echo "::error::Version '$VERSION' is not a valid release tag (expected vX.Y.Z, vX.Y.Z-alpha.N or vX.Y.Z-beta.N — alpha and beta are the only channels)"
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
@@ -394,11 +401,14 @@ jobs:
           BARE: ${{ steps.resolved.outputs.BARE }}
         run: |
           if [ ! -f CHANGELOG.md ]; then
-            echo "::warning::CHANGELOG.md not present — skipping changelog guard"
-            exit 0
+            echo "::error::CHANGELOG.md not present — its ${VERSION} section is the release body and the updater notes. Add one before tagging."
+            exit 1
           fi
-          if ! grep -E "^#{1,2} +\[?(${VERSION}|${BARE})\]?" CHANGELOG.md >/dev/null; then
-            echo "::error::CHANGELOG.md has no entry for ${VERSION} (or ${BARE}). Add one before tagging."
+          # The same heading shape the release-body extractor in create-release reads
+          # (`## [X.Y.Z]`): a looser guard passed headings the extractor cannot find,
+          # and the release then shipped with a placeholder body.
+          if ! grep -E "^## \[(${VERSION}|${BARE})\]" CHANGELOG.md >/dev/null; then
+            echo "::error::CHANGELOG.md has no '## [${BARE}]' heading. Add one before tagging."
             exit 1
           fi
           echo "Found CHANGELOG entry for ${VERSION}."
@@ -412,6 +422,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A dispatch retry names the tag; without this it would build whatever the
+          # default branch is at retry time and attach that beside the tag's assets.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -575,6 +589,10 @@ jobs:
           fi
 
       - uses: actions/checkout@v7
+        with:
+          # A dispatch retry names the tag; without this it would build whatever the
+          # default branch is at retry time and attach that beside the tag's assets.
+          ref: ${{ inputs.tag || github.ref }}
 
       # The release body IS the tag's CHANGELOG section: it becomes the notes
       # users see on the release page AND — via create-updater-json's `notes`
@@ -625,7 +643,7 @@ jobs:
           NOTES_FILE: ${{ steps.notes.outputs.file }}
         with:
           # Default GITHUB_TOKEN cannot write to another repo.
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const { readFileSync } = require('node:fs');
             const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME, NOTES_FILE } = process.env;
@@ -671,6 +689,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A dispatch retry names the tag; without this it would build whatever the
+          # default branch is at retry time and attach that beside the tag's assets.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -788,6 +810,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          # Half-configured is a hard fail, as it is for Windows: a certificate with no
+          # identity or no password makes tauri-bundler build unsigned, and the verify
+          # step can only warn about what it cannot tell apart from "unconfigured".
+          # Identity alone stays legal — that is the self-hosted keychain mode.
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            for required in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE_PASSWORD; do
+              if [ -z "${!required:-}" ]; then
+                echo "::error::APPLE_CERTIFICATE is set but ${required} is empty — Apple signing is half-configured; set both or neither"
+                exit 1
+              fi
+            done
+          fi
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
                       APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH \
                       APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
@@ -1063,7 +1097,7 @@ jobs:
         env:
           # Writes assets to the releases repo; the default GITHUB_TOKEN cannot
           # write cross-repo, so RELEASES_TOKEN wins when configured.
-          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # Empty-set is CORRECT for passwordless keys (var_os → Some("")).
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -1231,7 +1265,7 @@ jobs:
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
           TARGETS: ${{ needs.plan.outputs.targets }}
         with:
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const version = process.env.VERSION;
             const channel = process.env.CHANNEL;
@@ -1300,7 +1334,7 @@ jobs:
             // Incomplete entries stay: verify-release fails loudly rather than
             // silently shipping a manifest missing a target.
             const updateManifest = {
-              version: version.replace('v', ''),
+              version: version.replace(/^v/, ''),
               notes: release.body || 'No release notes provided',
               pub_date: release.published_at || new Date().toISOString(),
               platforms,
@@ -1340,7 +1374,7 @@ jobs:
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
             const channel = process.env.CHANNEL;
@@ -1385,12 +1419,60 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          VERSION: ${{ needs.check-changelog.outputs.version }}
         with:
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
+            const owner = process.env.REL_OWNER;
+            const repo = process.env.REL_NAME;
+            const channel = process.env.CHANNEL;
+            // `releases/latest` is what every stable updater polls, and GitHub's
+            // default for make_latest is "the release published most recently" —
+            // not the highest version. A hotfix on an older line published after a
+            // newer minor would capture it and offer every client a downgrade. Only
+            // a stable release that is at least the current latest may take it.
+            const parse = (v) => {
+              const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(v);
+              return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? null] : null;
+            };
+            // semver §11 precedence: identifier by identifier, numeric ones by value,
+            // so alpha.10 ranks above alpha.9 and a bare alpha below alpha.1.
+            const compare = (a, b) => {
+              for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] - b[i];
+              if (a[3] === null && b[3] === null) return 0;
+              if (a[3] === null) return 1;
+              if (b[3] === null) return -1;
+              const x = a[3].split('.'), y = b[3].split('.');
+              for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+                if (x[i] === undefined) return -1;
+                if (y[i] === undefined) return 1;
+                if (x[i] === y[i]) continue;
+                const nx = /^\d+$/.test(x[i]), ny = /^\d+$/.test(y[i]);
+                if (nx && ny) return Number(x[i]) - Number(y[i]);
+                if (nx !== ny) return nx ? -1 : 1;
+                return x[i] < y[i] ? -1 : 1;
+              }
+              return 0;
+            };
+            let makeLatest = 'false';
+            if (channel === 'stable') {
+              makeLatest = 'true';
+              try {
+                const { data: current } = await github.rest.repos.getLatestRelease({ owner, repo });
+                const mine = parse(process.env.VERSION);
+                const theirs = parse(current.tag_name);
+                if (mine && theirs && compare(mine, theirs) < 0) {
+                  makeLatest = 'false';
+                  core.warning(`${process.env.VERSION} is below the current latest ${current.tag_name}; publishing without taking releases/latest`);
+                }
+              } catch (error) {
+                if (error.status !== 404) throw error; // no latest yet: this one is it
+              }
+            }
             await github.rest.repos.updateRelease({
-              owner: process.env.REL_OWNER, repo: process.env.REL_NAME,
-              release_id: Number(process.env.RELEASE_ID), draft: false,
+              owner, repo, release_id: Number(process.env.RELEASE_ID),
+              draft: false, make_latest: makeLatest,
             })
 
       # Post-publish smoke test: now that the release is public, the manifest
@@ -1433,7 +1515,7 @@ jobs:
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
             const channel = process.env.CHANNEL;
@@ -1462,8 +1544,47 @@ jobs:
                 prerelease: true,
               })).data;
             }
+            // The rolling pointer is what every client on this channel polls, so it
+            // may only move forward: a retried or late-dispatched older prerelease
+            // must not replace a newer one and offer everyone above it a downgrade.
             const stale = rolling.assets.find((a) => a.name === 'latest.json');
-            if (stale) await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: stale.id });
+            const mine = JSON.parse(Buffer.from(download.data).toString('utf8')).version;
+            if (stale) {
+              const existing = await github.rest.repos.getReleaseAsset({
+                owner, repo, asset_id: stale.id, headers: { accept: 'application/octet-stream' },
+              });
+              const theirs = JSON.parse(Buffer.from(existing.data).toString('utf8')).version;
+              const parse = (v) => {
+                const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(v);
+                return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? null] : null;
+              };
+              // semver §11 precedence, as in publish-release above: alpha.10 ranks
+              // above alpha.9, which a string comparison gets backwards.
+              const compare = (a, b) => {
+                for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] - b[i];
+                if (a[3] === null && b[3] === null) return 0;
+                if (a[3] === null) return 1;
+                if (b[3] === null) return -1;
+                const x = a[3].split('.'), y = b[3].split('.');
+                for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+                  if (x[i] === undefined) return -1;
+                  if (y[i] === undefined) return 1;
+                  if (x[i] === y[i]) continue;
+                  const nx = /^\d+$/.test(x[i]), ny = /^\d+$/.test(y[i]);
+                  if (nx && ny) return Number(x[i]) - Number(y[i]);
+                  if (nx !== ny) return nx ? -1 : 1;
+                  return x[i] < y[i] ? -1 : 1;
+                }
+                return 0;
+              };
+              const a = parse(mine);
+              const b = parse(theirs);
+              if (a && b && compare(a, b) < 0) {
+                core.warning(`${rollingTag}/latest.json already points at ${theirs}, newer than ${mine}; leaving it`);
+                return;
+              }
+              await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: stale.id });
+            }
             await github.rest.repos.uploadReleaseAsset({
               owner, repo, release_id: rolling.id, name: 'latest.json', data: Buffer.from(download.data),
             });
@@ -1664,9 +1785,11 @@ jobs:
   # GITHUB_TOKEN pushes don't trigger workflows — re-run CI on the PR
   # manually if needed.
   bump-version:
-    needs: [create-release, build-and-release]
+    # After publishing, as the PR body says: a release that failed verification or never
+    # flipped public must not open a bump PR for a version nobody can install.
+    needs: [create-release, build-and-release, publish-release]
     runs-on: ubuntu-latest
-    if: needs.build-and-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.post_release_bump
+    if: needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.post_release_bump
     permissions:
       contents: write
       pull-requests: write
@@ -1765,6 +1888,13 @@ jobs:
           set -euo pipefail
           if git diff --quiet; then
             echo "::warning::Version files already at next patch; nothing to bump."
+            exit 0
+          fi
+          # A dispatch retry of the same tag reaches here a second time; pushing the
+          # branch again is a non-fast-forward that fails the whole release job and
+          # skips every downstream channel of a release that did publish.
+          if [ -n "$(git ls-remote --heads origin "$BRANCH")" ]; then
+            echo "::warning::Branch ${BRANCH} already exists on origin — the bump PR was opened by an earlier run."
             exit 0
           fi
           git config user.name "github-actions[bot]"
