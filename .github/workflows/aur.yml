@@ -398,5 +398,8 @@ jobs:
             ${{ steps.render.outputs.workdir }}/PKGBUILD
             ${{ steps.render.outputs.workdir }}/.SRCINFO
             ${{ steps.render.outputs.workdir }}/${{ inputs.pkgname }}.install
+          # upload-artifact drops dotfiles by default, even ones named explicitly,
+          # so without this the artifact never carried .SRCINFO.
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 30
