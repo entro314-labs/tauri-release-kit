@@ -879,11 +879,17 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
+      # No dependency cache, for the reason there is no Rust cache below: a
+      # tag run can only restore what the default branch saved, and anything
+      # able to write that key would feed the pnpm store — and so the
+      # frontend bundled into the signed app — from outside this release.
+      # `package-manager-cache: false` also stops setup-node's automatic
+      # caching when package.json's packageManager names npm.
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'pnpm'
+          package-manager-cache: false
 
       # The pinned toolchain from rust-toolchain.toml is what cargo actually
       # uses; the toml MUST declare components = ["rustfmt", "clippy"], because

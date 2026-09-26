@@ -206,7 +206,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'pnpm'
+          # No pnpm store cache: same reasoning as the Rust cache below.
+          package-manager-cache: false
 
       # A universal binary needs BOTH Apple targets installed, whichever
       # architecture the runner happens to be.
@@ -506,7 +507,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'pnpm'
+          # No pnpm store cache: same reasoning as the Rust cache below.
+          package-manager-cache: false
 
       - name: Setup Rust
         if: steps.prereq.outputs.ready == 'true'
