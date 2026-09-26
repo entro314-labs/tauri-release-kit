@@ -185,16 +185,16 @@ jobs:
           fi
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.prereq.outputs.ready == 'true'
 
       - name: Install pnpm
         if: steps.prereq.outputs.ready == 'true'
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         if: steps.prereq.outputs.ready == 'true'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node_version }}
           cache: 'pnpm'
@@ -203,13 +203,13 @@ jobs:
       # architecture the runner happens to be.
       - name: Setup Rust
         if: steps.prereq.outputs.ready == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache Rust workspace
         if: steps.prereq.outputs.ready == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ inputs.project_path }}/src-tauri
           shared-key: appstore-${{ inputs.macos_target }}
@@ -438,7 +438,7 @@ jobs:
       # universal build to retry an upload is pure waste.
       - name: Upload .pkg as a workflow artifact
         if: always() && steps.pkg.outputs.pkg != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: app-store-pkg
           path: ${{ steps.pkg.outputs.pkg }}
@@ -483,29 +483,29 @@ jobs:
           fi
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.prereq.outputs.ready == 'true'
 
       - name: Install pnpm
         if: steps.prereq.outputs.ready == 'true'
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node.js
         if: steps.prereq.outputs.ready == 'true'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ inputs.node_version }}
           cache: 'pnpm'
 
       - name: Setup Rust
         if: steps.prereq.outputs.ready == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
       - name: Cache Rust workspace
         if: steps.prereq.outputs.ready == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ inputs.project_path }}/src-tauri
           shared-key: appstore-ios
@@ -612,7 +612,7 @@ jobs:
 
       - name: Upload .ipa as a workflow artifact
         if: always() && steps.upload.outputs.ipa != ''
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: app-store-ipa
           path: ${{ steps.upload.outputs.ipa }}
