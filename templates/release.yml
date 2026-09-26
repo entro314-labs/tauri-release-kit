@@ -52,6 +52,9 @@ jobs:
       #     THIS repo behind its protection rules. See the kit README's
       #     "Scoping secrets to an environment" before adding reviewers.
       # environment: 'release'
+      # --- macOS linkage check (default true): fails a darwin leg whose .app
+      #     links a Homebrew path (/opt/homebrew, /usr/local/{opt,Cellar,lib}).
+      # macos_linkage_check: false
       # --- Package smoke tests (optional, default false): install + launch
       #     what each leg built (deb version, AppImage under Xvfb, MSI
       #     ProductVersion, NSIS install + launch, dmg verify + .app launch).

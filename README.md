@@ -247,6 +247,20 @@ pinned (`job.workflow_repository` @ `job.workflow_sha`) with the caller's
 `GITHUB_TOKEN`, which cannot read another private repository — so a private
 fork's verify step fails at that checkout. Keep the kit repo public.
 
+## macOS linkage check
+
+Every darwin leg runs `otool -L` over the built `.app`'s main binary,
+sidecars and bundled dylibs/frameworks, and fails when one loads a library
+from `/opt/homebrew/` or `/usr/local/{opt,Cellar,lib}/`. Such a path exists
+on the build runner — so the leg builds, notarizes and even launches — and
+the app crashes at launch ("dyld: Library not loaded") on every machine
+without that Homebrew formula. Fix it by vendoring/static-linking the
+dependency (e.g. the `vendored` feature of `openssl-sys`), or by bundling the
+dylib and linking it via `@rpath`. `macos_linkage_check: false` turns it off;
+the only legitimate reason is an app that is distributed exclusively in a way
+that guarantees the formula is installed (a Homebrew cask with
+`depends_on formula:`).
+
 ## Package smoke tests (opt-in)
 
 `smoke_test: true` installs and launches what each leg built, on every leg

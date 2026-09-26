@@ -261,6 +261,18 @@ on:
         required: false
         type: boolean
         default: true
+      macos_linkage_check:
+        description: >-
+          Fail a darwin leg when any Mach-O file in the built .app (main
+          binary, sidecars, bundled dylibs/frameworks) loads a library from
+          /opt/homebrew/ or /usr/local/{opt,Cellar,lib}/ — a path that exists
+          on the build runner and crashes the app at launch on machines
+          without that Homebrew formula. On by default; turn off only if the
+          app is deliberately distributed with that dependency guaranteed
+          (e.g. solely through a Homebrew cask that `depends_on` the formula).
+        required: false
+        type: boolean
+        default: true
       smoke_test:
         description: >-
           Install and launch the built packages on every leg whose runner can
@@ -1306,7 +1318,7 @@ jobs:
       # The kit's own scripts, at the commit the caller pinned. Checked out
       # AFTER tauri-action so its config/workspace discovery never sees them.
       - name: Check out the kit's scripts
-        if: inputs.smoke_test
+        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -1315,11 +1327,27 @@ jobs:
           persist-credentials: false
 
       - name: Confirm the kit checkout
-        if: inputs.smoke_test
+        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check)
         shell: bash
         run: |
           test -f .release-kit/scripts/verify-release.mjs \
             || { echo "::error::The kit checkout did not resolve (job.workflow_repository/job.workflow_sha) — no scripts/verify-release.mjs"; exit 1; }
+
+      # A binary or sidecar linked against a Homebrew library records that
+      # absolute path; the runner has the file, so the leg builds, notarizes
+      # and launches, and every user machine without the formula crashes with
+      # "dyld: Library not loaded". Notarization never looks at load paths.
+      # One otool -L per Mach-O file (scripts/check-macos-linkage.sh).
+      - name: Check macOS library linkage
+        if: matrix.os_name == 'darwin' && inputs.macos_linkage_check
+        env:
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+        run: |
+          set -euo pipefail
+          # `app` is mandatory on darwin legs (the plan job enforces it).
+          APP="$(find "$BUNDLE_DIR/macos" -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
+          [ -n "$APP" ] || { echo "::error::No .app under ${BUNDLE_DIR}/macos to check"; exit 1; }
+          bash .release-kit/scripts/check-macos-linkage.sh "$APP"
 
       # Opt-in (smoke_test): signatures say an artifact is ours, not that it
       # installs or starts. Launching needs the runner to execute the target's
