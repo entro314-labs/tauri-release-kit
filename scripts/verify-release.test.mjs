@@ -15,12 +15,13 @@ import {
   checksumAssets,
   compareAssets,
   expectedAssets,
-  ghAssetName,
   loadAppNaming,
   manifestName,
   pubkeyKeyId,
   renderSummary,
   run,
+  safeName,
+  uploadName,
   signatureKeyId,
   updaterAsset,
   wixLanguages,
@@ -37,10 +38,16 @@ const naming = appNaming({ base: { productName: 'MyApp', plugins: { updater: { p
 const DEFAULT_BUNDLES = { macos: ['app', 'dmg'], windows: ['nsis'], linux: ['deb', 'rpm', 'appimage'] }
 const BASE = 'https://github.com/org/myapp-releases/releases/download/v1.2.3/'
 
-test('ghAssetName matches GitHub renaming', () => {
-  assert.equal(ghAssetName('My App_1.0.0_x64-setup.exe'), 'My.App_1.0.0_x64-setup.exe')
-  assert.equal(ghAssetName('A (beta)_1.0.0_amd64.deb'), 'A.beta._1.0.0_amd64.deb')
-  assert.equal(ghAssetName('MyApp-1.0.0-1.x86_64.rpm'), 'MyApp-1.0.0-1.x86_64.rpm')
+test('safeName keeps only characters GitHub stores unchanged', () => {
+  assert.equal(safeName('My App'), 'My.App')
+  assert.equal(safeName('A (beta)'), 'A.beta.')
+  assert.equal(safeName('my-app_2'), 'my-app_2')
+})
+
+test('uploadName prefers the label tauri-action records', () => {
+  assert.equal(uploadName({ name: 'My.App_1.0.0_x64.dmg', label: 'My App_1.0.0_x64.dmg' }), 'My App_1.0.0_x64.dmg')
+  assert.equal(uploadName({ name: 'latest.json', label: '' }), 'latest.json')
+  assert.equal(uploadName({ name: 'SHA256SUMS', label: null }), 'SHA256SUMS')
 })
 
 test('cargoPackageName reads only the [package] table', () => {
@@ -55,14 +62,15 @@ test('wixLanguages accepts every tauri shape', () => {
   assert.deepEqual(wixLanguages({ 'en-US': null, 'pt-BR': { localePath: 'x' } }), ['en-US', 'pt-BR'])
 })
 
-test('appNaming: overlay wins, cargo name is the fallback, names are GitHub-normalised', () => {
+test('appNaming: overlay wins, cargo name is the fallback, the SBOM name is file-safe', () => {
   const n = appNaming({
     base: { bundle: { linux: { rpm: { release: '3' } } } },
     overlays: { windows: { productName: 'My App', bundle: { windows: { wix: { language: ['de-DE'] } } } } },
     cargoName: 'my-app',
   })
   assert.equal(n.darwin.product, 'my-app')
-  assert.equal(n.windows.product, 'My.App')
+  assert.equal(n.windows.product, 'My App')
+  assert.equal(n.product, 'my-app')
   assert.deepEqual(n.windows.wixLanguages, ['de-DE'])
   assert.equal(n.linux.rpmRelease, '3')
   assert.equal(n.pubkey, null)
@@ -174,7 +182,7 @@ function goodSigs(targets = ALL) {
 }
 
 test('checkManifest passes a correct manifest', () => {
-  const r = checkManifest({ manifest: goodManifest(), version: '1.2.3', targets: ALL, downloadBase: BASE, naming, sigFiles: goodSigs() })
+  const r = checkManifest({ manifest: goodManifest(), version: '1.2.3', targets: ALL, downloadBase: BASE, naming, sigFiles: goodSigs(), stored: new Map() })
   assert.deepEqual(r, { version: [], platforms: [], urls: [], signatures: [], envelopes: [] })
 })
 
@@ -186,7 +194,7 @@ test('checkManifest catches wrong repo, wrong asset, stale sig, foreign key, pla
   const sigs = goodSigs()
   sigs.set('MyApp_1.2.3_amd64.AppImage.sig', `${SIG}\n`)
   const foreign = appNaming({ base: { productName: 'MyApp', plugins: { updater: { pubkey: OTHER_PUBKEY } } }, overlays: {}, cargoName: null })
-  const r = checkManifest({ manifest, version: '1.2.3', targets: ['darwin-aarch64', 'windows-x86_64', 'linux-x86_64', 'linux-aarch64'], downloadBase: BASE, naming: foreign, sigFiles: sigs })
+  const r = checkManifest({ manifest, version: '1.2.3', targets: ['darwin-aarch64', 'windows-x86_64', 'linux-x86_64', 'linux-aarch64'], downloadBase: BASE, naming: foreign, sigFiles: sigs, stored: new Map() })
   assert.equal(r.version.length, 1)
   assert.deepEqual(r.platforms, ['linux-aarch64 missing'])
   assert.equal(r.urls.length, 2)
@@ -200,7 +208,7 @@ test('checkManifest catches wrong repo, wrong asset, stale sig, foreign key, pla
 test('checkManifest: missing .sig asset, non-minisign signature, extra platform', () => {
   const manifest = goodManifest(['linux-x86_64', 'darwin-aarch64'])
   manifest.platforms['linux-x86_64'].signature = Buffer.from('hello').toString('base64')
-  const r = checkManifest({ manifest, version: '1.2.3', targets: ['linux-x86_64'], downloadBase: BASE, naming, sigFiles: new Map() })
+  const r = checkManifest({ manifest, version: '1.2.3', targets: ['linux-x86_64'], downloadBase: BASE, naming, sigFiles: new Map(), stored: new Map() })
   assert.deepEqual(r.platforms, ['darwin-aarch64 not shipped'])
   assert.deepEqual(r.signatures, ['linux-x86_64: MyApp_1.2.3_amd64.AppImage.sig is not on the release'])
   assert.deepEqual(r.envelopes, ['linux-x86_64: signature is not a minisign envelope'])
@@ -350,7 +358,7 @@ test('CLI prints the SBOM product name', () => {
   writeFileSync(join(dir, 'tauri.conf.json'), JSON.stringify({ productName: 'My App' }))
   writeFileSync(join(dir, 'tauri.macos.conf.json'), JSON.stringify({ productName: 'Mac Only' }))
   const script = new URL('./verify-release.mjs', import.meta.url).pathname
-  assert.equal(execFileSync(process.execPath, [script, 'product', dir], { encoding: 'utf8' }), 'My.App\n')
+  assert.equal(execFileSync(process.execPath, [script, 'product', dir], { encoding: 'utf8' }), 'My.App\n') // file-safe
   assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }))
 })
 
@@ -371,4 +379,34 @@ test('CLI updater-key: match, mismatch, no inline pubkey, not a signature', () =
   assert.equal(call('./keys/updater.pub').code, 3)
   writeFileSync(join(dir, 'junk.sig'), 'nope')
   assert.equal(call(PUBKEY, join(dir, 'junk.sig')).code, 1)
+})
+
+test('buildChecks: a product name with a space, stored renamed by GitHub, labelled by tauri-action', () => {
+  const spaced = appNaming({ base: { productName: 'My App', plugins: { updater: { pubkey: PUBKEY } } }, overlays: {}, cargoName: null })
+  const targets = ['linux-x86_64']
+  const expected = expectedAssets({ version: '1.2.3', channel: 'stable', targets, bundles: { macos: [], windows: [], linux: ['appimage'] }, naming: spaced })
+  assert.deepEqual(expected.required, ['latest.json', 'My App_1.2.3_amd64.AppImage', 'My App_1.2.3_amd64.AppImage.sig'])
+  const digest = `sha256:${ZERO}`
+  const release = {
+    draft: true, prerelease: false,
+    assets: [
+      { id: 0, name: 'latest.json', label: '', size: 1, digest },
+      { id: 1, name: 'My.App_1.2.3_amd64.AppImage', label: 'My App_1.2.3_amd64.AppImage', size: 1, digest },
+      { id: 2, name: 'My.App_1.2.3_amd64.AppImage.sig', label: 'My App_1.2.3_amd64.AppImage.sig', size: 1, digest },
+    ],
+  }
+  const manifest = { version: '1.2.3', platforms: { 'linux-x86_64': { url: `${BASE}My.App_1.2.3_amd64.AppImage`, signature: SIG } } }
+  const sums = `${ZERO}  My.App_1.2.3_amd64.AppImage\n${ZERO}  My.App_1.2.3_amd64.AppImage.sig\n${ZERO}  latest.json\n`
+  const rows = buildChecks({
+    release, channel: 'stable', version: '1.2.3', expected, manifest, targets, downloadBase: BASE, naming: spaced,
+    sigFiles: new Map([['My.App_1.2.3_amd64.AppImage.sig', SIG]]), sums,
+  })
+  assert.ok(rows.every((r) => r.ok), JSON.stringify(rows.filter((r) => !r.ok)))
+  // Pointing the manifest at the un-renamed name (a 404) is caught.
+  manifest.platforms['linux-x86_64'].url = `${BASE}My%20App_1.2.3_amd64.AppImage`
+  const bad = buildChecks({
+    release, channel: 'stable', version: '1.2.3', expected, manifest, targets, downloadBase: BASE, naming: spaced,
+    sigFiles: new Map([['My.App_1.2.3_amd64.AppImage.sig', SIG]]), sums,
+  })
+  assert.deepEqual(bad.filter((r) => !r.ok).map((r) => r.name), ['updater URLs'])
 })

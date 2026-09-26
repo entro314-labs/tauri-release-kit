@@ -28,8 +28,11 @@
  * Expected asset names are computed, never listed per app. They follow tauri-action v1's
  * naming (it uploads only files at the paths it predicts, so its prediction IS the upload
  * set), with the app's productName / rpm release / WiX languages read from tauri.conf.json
- * and the per-OS overlay the way tauri-action merges them, then GitHub's renaming of special
- * characters in asset names.
+ * and the per-OS overlay the way tauri-action merges them. They are compared with what was
+ * uploaded, not with what GitHub stored: GitHub renames special characters in asset names
+ * ("My App_1.0.0_x64.dmg" is served as "My.App_1.0.0_x64.dmg"), and tauri-action records
+ * the name it uploaded as the asset's label, so no copy of GitHub's renaming rule is needed.
+ * Stored names are then resolved through that label wherever a URL or a download needs one.
  */
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
@@ -50,14 +53,22 @@ export const TARGETS = {
 const OVERLAY = { darwin: 'tauri.macos.conf.json', windows: 'tauri.windows.conf.json', linux: 'tauri.linux.conf.json' }
 
 /**
- * The name GitHub stores for an uploaded asset: characters outside [A-Za-z0-9_-] become
- * dots (a product name "My App" is served as "My.App_…"). Same rule tauri-action uses to
- * find an asset it uploaded earlier.
+ * A file name made only of [A-Za-z0-9_.-] (anything else becomes a dot), for the files this
+ * kit names itself (the SBOMs): such a name is stored by GitHub exactly as uploaded.
  * @param {string} name
  * @returns {string}
  */
-export function ghAssetName(name) {
+export function safeName(name) {
   return name.trim().replace(/[^a-zA-Z0-9_-]/g, '.').replace(/\.\./g, '.')
+}
+
+/**
+ * The name an asset was uploaded under: tauri-action sets `label` to it (GitHub keeps labels
+ * verbatim), the kit's own uploads set no label and use names GitHub does not rename.
+ * @param {{ name: string, label?: string | null }} asset
+ */
+export function uploadName(asset) {
+  return asset.label || asset.name
 }
 
 /** Splits a comma-separated input into trimmed, non-empty entries. */
@@ -113,13 +124,13 @@ export function appNaming({ base, overlays, cargoName }) {
     if (!name) {
       throw new Error('tauri.conf.json has no productName and Cargo.toml has no [package] name to fall back on')
     }
-    return ghAssetName(name)
+    return name
   }
   const release = pick('linux', (c) => c?.bundle?.linux?.rpm?.release)
   const baseName = base?.productName ?? cargoName
   return {
-    // The un-overlaid name, for release-wide files (the SBOMs).
-    product: baseName ? ghAssetName(baseName) : product('darwin'),
+    // The un-overlaid name, made file-safe, for release-wide files (the SBOMs).
+    product: safeName(baseName ?? product('darwin')),
     darwin: { product: product('darwin') },
     windows: { product: product('windows'), wixLanguages: wixLanguages(pick('windows', (c) => c?.bundle?.windows?.wix?.language)) },
     linux: { product: product('linux'), rpmRelease: release ? String(release) : '1' },
@@ -286,13 +297,14 @@ function keyIdHex(bytes) {
 /**
  * Checks the updater manifest against the shipped platform set and the uploaded signatures.
  * @param {{ manifest: any, version: string, targets: string[], downloadBase: string,
- *   naming: ReturnType<typeof appNaming>, sigFiles: Map<string, string> }} input
+ *   naming: ReturnType<typeof appNaming>, sigFiles: Map<string, string>, stored: Map<string, string> }} input
  *   `downloadBase` is https://github.com/<serving repo>/releases/download/<tag>/;
- *   `sigFiles` maps an uploaded .sig asset's name to its exact content.
+ *   `sigFiles` maps an uploaded .sig asset's stored name to its exact content;
+ *   `stored` maps each asset's upload name to the name GitHub stored it under.
  * @returns {{ version: string[], platforms: string[], urls: string[], signatures: string[], envelopes: string[] }}
  *   failures per check (empty = pass)
  */
-export function checkManifest({ manifest, version, targets, downloadBase, naming, sigFiles }) {
+export function checkManifest({ manifest, version, targets, downloadBase, naming, sigFiles, stored }) {
   const out = { version: [], platforms: [], urls: [], signatures: [], envelopes: [] }
   if (manifest?.version !== version) out.version.push(`manifest says ${JSON.stringify(manifest?.version)}, tag says ${version}`)
   const platforms = manifest?.platforms && typeof manifest.platforms === 'object' ? manifest.platforms : {}
@@ -304,14 +316,17 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
   for (const target of targets) {
     const entry = platforms[target]
     if (!entry) continue
-    const asset = updaterAsset(target, naming, version)
+    const uploaded = updaterAsset(target, naming, version)
+    // The URL must use the name GitHub serves the file under.
+    const asset = stored.get(uploaded) ?? uploaded
     const url = String(entry.url ?? '')
     if (!url.startsWith(downloadBase)) out.urls.push(`${target}: ${url || '(none)'} is not under ${downloadBase}`)
     else if (decodeURIComponent(url.slice(downloadBase.length)) !== asset) out.urls.push(`${target}: points at ${url.slice(downloadBase.length)}, expected ${asset}`)
 
-    const sigFile = sigFiles.get(`${asset}.sig`)
-    if (sigFile === undefined) out.signatures.push(`${target}: ${asset}.sig is not on the release`)
-    else if (entry.signature !== sigFile) out.signatures.push(`${target}: signature differs from ${asset}.sig`)
+    const sigName = stored.get(`${uploaded}.sig`) ?? `${uploaded}.sig`
+    const sigFile = sigFiles.get(sigName)
+    if (sigFile === undefined) out.signatures.push(`${target}: ${sigName} is not on the release`)
+    else if (entry.signature !== sigFile) out.signatures.push(`${target}: signature differs from ${sigName}`)
 
     const keyId = signatureKeyId(entry.signature)
     if (!keyId) out.envelopes.push(`${target}: signature is not a minisign envelope`)
@@ -373,8 +388,7 @@ export function buildChecks({ release, channel, version, expected, manifest, man
 
   row('still a draft', release.draft === true ? [] : ['the release is no longer a draft'], 'state')
   row('prerelease flag matches channel', release.prerelease === wantPrerelease ? [] : [`prerelease=${release.prerelease} on channel ${channel}`], 'state')
-  const names = release.assets.map((a) => a.name)
-  const { missing, unexpected } = compareAssets(names, expected)
+  const { missing, unexpected } = compareAssets(release.assets.map(uploadName), expected)
   row('expected assets present', missing, 'missing')
   row('no unexpected assets', unexpected, 'unexpected')
   const { empty, noDigest } = assetIntegrity(release.assets)
@@ -388,7 +402,8 @@ export function buildChecks({ release, channel, version, expected, manifest, man
     }
     return rows
   }
-  const m = checkManifest({ manifest, version, targets, downloadBase, naming, sigFiles })
+  const stored = new Map(release.assets.map((a) => [uploadName(a), a.name]))
+  const m = checkManifest({ manifest, version, targets, downloadBase, naming, sigFiles, stored })
   row('manifest version', m.version, 'mismatch')
   row('manifest platforms = targets', m.platforms, 'mismatch')
   row('updater URLs', m.urls, 'wrong')

@@ -2214,9 +2214,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: ${{ inputs.environment }}
-    # Pushes with HOMEBREW_TAP_TOKEN (or the GitHub App) and hashes public
-    # assets; no GITHUB_TOKEN use.
-    permissions: {}
+    # Pushes with HOMEBREW_TAP_TOKEN (or the GitHub App); GITHUB_TOKEN only
+    # reads the published release's asset list.
+    permissions:
+      contents: read
     if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
     steps:
       - name: Resolve tap
@@ -2281,6 +2282,7 @@ jobs:
         env:
           HOMEBREW_TAP_TOKEN: ${{ steps.app_token.outputs.token || secrets.HOMEBREW_TAP_TOKEN }}
           APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.create-release.outputs.version }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           APP_NAME: ${{ inputs.app_display_name }}
@@ -2296,6 +2298,24 @@ jobs:
           set -euo pipefail
           BARE="${VERSION#v}"
           BASE_URL="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${VERSION}"
+          # GitHub renames special characters in asset names ("My App_1.0.0_x64.dmg"
+          # is served as "My.App_1.0.0_x64.dmg"), so a URL built from productName
+          # 404s for any name with a space. Look the DMG up instead: tauri-action
+          # uploads it with the original name as its label.
+          gh api "repos/${REL_OWNER}/${REL_NAME}/releases/tags/${VERSION}" > "${RUNNER_TEMP}/release.json"
+          dmg_asset() {
+            local uploaded="${PRODUCT}_${BARE}_$1.dmg" stored
+            stored="$(jq -r --arg n "$uploaded" '[.assets[] | select((.label // "") == $n or .name == $n) | .name][0] // empty' "${RUNNER_TEMP}/release.json")"
+            if [ -z "$stored" ]; then
+              echo "::error::No asset uploaded as ${uploaded} on ${REL_OWNER}/${REL_NAME}@${VERSION} (DMGs there: $(jq -r '[.assets[].name | select(endswith(".dmg"))] | join(", ")' "${RUNNER_TEMP}/release.json")). Does product_name equal tauri.conf.json productName?" >&2
+              return 1
+            fi
+            printf '%s' "$stored"
+          }
+          # The cask's url interpolates #{version}; the stored name and the tag
+          # carry the version literally.
+          V='#{version}'
+          TAG_T="${VERSION//${BARE}/${V}}"
 
           # The cask only references DMGs for the mac arches the app actually
           # ships (plan's `targets`); prereq already guaranteed at least one.
@@ -2310,25 +2330,29 @@ jobs:
           ARM_BLOCK=""
           INTEL_BLOCK=""
           if [ "$HAS_ARM" = true ]; then
-            curl -fsSL -o arm64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_aarch64.dmg"
+            DMG_ARM="$(dmg_asset aarch64)"
+            curl -fsSL -o arm64.dmg "${BASE_URL}/${DMG_ARM}"
             SHA_ARM="$(sha256sum arm64.dmg | cut -d' ' -f1)"
+            URL_ARM="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${TAG_T}/${DMG_ARM//_${BARE}_/_${V}_}"
             ARM_BLOCK="$(cat <<ARM
 
             on_arm do
               sha256 "${SHA_ARM}"
-              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_aarch64.dmg"
+              url "${URL_ARM}"
             end
           ARM
           )"
           fi
           if [ "$HAS_X64" = true ]; then
-            curl -fsSL -o x64.dmg "${BASE_URL}/${PRODUCT}_${BARE}_x64.dmg"
+            DMG_X64="$(dmg_asset x64)"
+            curl -fsSL -o x64.dmg "${BASE_URL}/${DMG_X64}"
             SHA_X64="$(sha256sum x64.dmg | cut -d' ' -f1)"
+            URL_X64="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${TAG_T}/${DMG_X64//_${BARE}_/_${V}_}"
             INTEL_BLOCK="$(cat <<INTEL
 
             on_intel do
               sha256 "${SHA_X64}"
-              url "https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/v#{version}/${PRODUCT}_#{version}_x64.dmg"
+              url "${URL_X64}"
             end
           INTEL
           )"
