@@ -24,6 +24,10 @@ jobs:
       #     only: this workflow runs on pull_request, and a self-hosted
       #     runner on a public repo executes fork-PR code on your machine.
       # macos_runner: 'macbook'
+      # --- cargo audit (on by default; fails on any RustSec vulnerability in
+      #     Cargo.lock). Ignore an advisory only with the reason next to it.
+      # cargo_audit: false
+      # audit_ignore: 'RUSTSEC-2024-0370'   # ← why this one is accepted
 
   # Guards the changelog the release body and every update manifest are built from.
   # Skips itself on pushes: only a pull request carries a title to check.

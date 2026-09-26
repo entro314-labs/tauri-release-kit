@@ -22,7 +22,7 @@ encodes a CI failure that actually happened; read
 | Workflow | Purpose |
 | --- | --- |
 | `.github/workflows/release.yml` | Tag-triggered release: build → sign → manifest → verify → publish |
-| `.github/workflows/rust-checks.yml` | fmt + clippy (+ tests) on ubuntu/macos/windows for branch pushes |
+| `.github/workflows/rust-checks.yml` | fmt + clippy (+ tests) on ubuntu/macos/windows for branch pushes, plus a blocking `cargo audit` |
 | `.github/workflows/commit-lint.yml` | Checks pull request titles are Conventional Commits, so the changelog stays complete |
 | `.github/workflows/flatpak.yml` | Repacks the released `.deb` into a Flatpak bundle + Flathub manifest |
 | `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
@@ -59,7 +59,12 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      `bundle_identifier` + the `HOMEBREW_TAP_TOKEN` secret)
    - `templates/tests.yml` → `.github/workflows/tests.yml` (calls the Rust
      gates and the commit gate; set `lint_branch_commits: true` if you merge
-     without squashing)
+     without squashing). The Rust gates include a blocking `cargo audit` of
+     the workspace's `Cargo.lock` that fails on any RustSec vulnerability:
+     `cargo_audit: false` turns it off, and `audit_ignore` takes a
+     comma-separated list of advisory IDs you have accepted
+     (`'RUSTSEC-2024-0370,RUSTSEC-2025-0012'` — write down why next to it).
+     An unrecognised ID fails the job rather than ignoring nothing.
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
    - version bumping: either `scripts/version-manager.ts` → `tooling/scripts/`

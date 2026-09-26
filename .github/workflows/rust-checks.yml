@@ -1,5 +1,6 @@
 # Reusable Rust quality gates for Tauri apps: fmt + clippy (+ optional tests)
-# across the three desktop OSes. Run this on branch pushes/PRs so release tags
+# across the three desktop OSes, plus a blocking `cargo audit` of Cargo.lock
+# against the RustSec advisory database. Run this on branch pushes/PRs so release tags
 # never discover gate failures — the exact failure mode that burned six
 # release-workflow runs on the first release this kit was extracted from (a
 # Mac cannot see Linux-host
@@ -47,6 +48,23 @@ on:
         required: false
         type: string
         default: '24'
+      cargo_audit:
+        description: >-
+          Run `cargo audit` against the workspace's Cargo.lock and FAIL on any
+          RustSec vulnerability advisory (unmaintained/unsound warnings do not
+          fail it). Runs once, on ubuntu — the lockfile is the same on every OS.
+        required: false
+        type: boolean
+        default: true
+      audit_ignore:
+        description: >-
+          Comma-separated RustSec advisory IDs to ignore, e.g.
+          'RUSTSEC-2024-0370,RUSTSEC-2025-0012'. Each one is an accepted risk:
+          record why next to the caller's input. A `.cargo/audit.toml` in the
+          workspace is honoured too.
+        required: false
+        type: string
+        default: ''
       macos_runner:
         description: >-
           Runner for the macOS leg. Default: the GitHub-hosted macos-15 image,
@@ -145,3 +163,50 @@ jobs:
         run: |
           # shellcheck disable=SC2086 # TEST_ARGS is a caller-supplied flag list; splitting it is the point
           cargo test ${TEST_ARGS:-}
+
+  # A vulnerable dependency is invisible to fmt/clippy/tests and ships in
+  # every build; the advisory database moves daily, so this is also what
+  # surfaces a new CVE in an unchanged lockfile. Not part of the OS matrix:
+  # Cargo.lock is identical on all three.
+  cargo-audit:
+    if: inputs.cargo_audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Prebuilt, checksum-verified binary from the manifest committed at the
+      # pinned SHA (so the cargo-audit version moves only with a Dependabot
+      # bump of this action). fallback: none — never build an unpinned
+      # version from crates.io if the manifest cannot serve this runner.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit
+          fallback: none
+
+      - name: cargo audit
+        working-directory: ${{ inputs.rust_workspace_dir != '' && inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}
+        env:
+          AUDIT_IGNORE: ${{ inputs.audit_ignore }}
+        run: |
+          set -euo pipefail
+          if [ ! -f Cargo.lock ]; then
+            echo "::error::No Cargo.lock in ${PWD} — set rust_workspace_dir to the directory that holds the workspace lockfile"
+            exit 1
+          fi
+          ARGS=()
+          for id in $(printf '%s' "$AUDIT_IGNORE" | tr ',' ' '); do
+            # A typo here would silently ignore nothing, so reject it outright.
+            if ! printf '%s' "$id" | grep -Eq '^RUSTSEC-[0-9]{4}-[0-9]{4}$'; then
+              echo "::error::audit_ignore entry '${id}' is not a RustSec ID (RUSTSEC-YYYY-NNNN)"
+              exit 1
+            fi
+            ARGS+=(--ignore "$id")
+            echo "::notice::Ignoring ${id} (audit_ignore input)"
+          done
+          cargo audit "${ARGS[@]}"
