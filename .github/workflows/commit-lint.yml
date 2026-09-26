@@ -23,7 +23,7 @@ on:
           linter that changes under you turns an unrelated pull request red.
         required: false
         type: string
-        default: '2.8.0'
+        default: '2.9.4'
       lint_branch_commits:
         description: >-
           Also check every commit on the branch, not just the title. Leave off for a
@@ -44,14 +44,15 @@ jobs:
     if: github.event_name == 'pull_request'
 
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0 # the branch range needs both endpoints
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # release-kit 2.9 declares engines.node >=24.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
 
       # The title reaches the shell through env, never through ${{ }} interpolation: on a
       # fork's pull request it is attacker-controlled text.
