@@ -510,6 +510,9 @@ jobs:
       matrix: ${{ steps.plan.outputs.MATRIX }}
       targets: ${{ steps.plan.outputs.TARGETS }}
       macos_bundles: ${{ steps.plan.outputs.MACOS_BUNDLES }}
+      # The x86_64 leg's list; the aarch64 leg is the same minus msi.
+      windows_bundles: ${{ steps.plan.outputs.WINDOWS_BUNDLES }}
+      linux_bundles: ${{ steps.plan.outputs.LINUX_BUNDLES }}
     env:
       TARGETS: ${{ inputs.targets }}
       BUILD_TARGETS: ${{ inputs.build_targets }}
@@ -1452,9 +1455,14 @@ jobs:
             console.log(`Uploaded ${manifestName} for channel ${channel}`);
 
   verify-release:
-    # Fail loud BEFORE the draft flips public: catches missing signatures and
-    # 404 download URLs before users see a broken update prompt.
-    needs: [check-changelog, create-release, build-and-release, create-updater-json]
+    # Fail loud BEFORE the draft flips public. The checks live in the kit's
+    # scripts/verify-release.mjs (unit-tested, see its header for the list):
+    # the asset list must equal what `targets` x the *_bundles inputs produce
+    # (missing AND unexpected names fail), every asset must be non-empty with a
+    # GitHub sha256 digest, and the updater manifest must cover exactly the
+    # shipped platforms with URLs on the serving repo's tag path and signatures
+    # byte-identical to the uploaded .sig files, made by the app's own pubkey.
+    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
@@ -1464,52 +1472,70 @@ jobs:
       contents: write
     if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
     steps:
+      # The app's tauri.conf.json + per-OS overlays name the assets
+      # (productName, rpm release, WiX languages) and carry the updater pubkey.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+          path: app
+
+      # The verification script, from the kit commit the caller pinned — not
+      # from `main`, so a consumer pinned to a SHA runs the checks of that SHA.
+      - name: Check out the kit's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-kit
+          persist-credentials: false
+
+      # If job.workflow_* ever resolved empty, checkout would quietly fetch the
+      # APP repo into .release-kit; fail on that here instead of on an import.
+      - name: Confirm the kit checkout
+        run: |
+          test -f .release-kit/scripts/verify-release.mjs \
+            || { echo "::error::The kit checkout did not resolve (job.workflow_repository/job.workflow_sha) — no scripts/verify-release.mjs"; exit 1; }
+
       # Pre-publish verification must go through the API: draft-release assets
-      # are NOT downloadable via their public URLs. URL correctness is
-      # guaranteed by construction (deterministic tag paths); public
-      # reachability is smoke-tested post-publish in publish-release.
-      - name: Verify update manifest + assets (via API)
+      # are NOT downloadable via their public URLs. Public reachability is
+      # smoke-tested post-publish in publish-release. A failing result is
+      # re-read up to 8 times, 5 s apart (GitHub computes digests
+      # asynchronously), and the step summary is written either way.
+      - name: Verify release assets + update manifest (via API)
+        id: verify
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
-          EXPECTED_VERSION: ${{ needs.create-release.outputs.version }}
+          TAG: ${{ needs.create-release.outputs.version }}
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          MACOS_BUNDLES: ${{ needs.plan.outputs.macos_bundles }}
+          WINDOWS_BUNDLES: ${{ needs.plan.outputs.windows_bundles }}
+          LINUX_BUNDLES: ${{ needs.plan.outputs.linux_bundles }}
+          SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
         with:
           github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
-            const releaseId = Number(process.env.RELEASE_ID);
-            const channel = process.env.CHANNEL;
-            const expectedVersion = process.env.EXPECTED_VERSION;
-            const owner = process.env.REL_OWNER;
-            const repo = process.env.REL_NAME;
-            const manifestName = channel === 'stable' ? 'latest.json' : `latest-${channel}.json`;
+            const { pathToFileURL } = require('node:url');
+            const { run } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.release-kit/scripts/verify-release.mjs`).href);
+            await run({ github, core, env: process.env });
 
-            const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
-            const manifestAsset = release.assets.find((a) => a.name === manifestName);
-            if (!manifestAsset) { core.setFailed(`Missing update manifest asset: ${manifestName}`); return; }
-
-            const download = await github.rest.repos.getReleaseAsset({
-              owner, repo, asset_id: manifestAsset.id, headers: { accept: 'application/octet-stream' },
-            });
-            const manifest = JSON.parse(Buffer.from(download.data).toString('utf8'));
-
-            const expectedSemver = expectedVersion.replace(/^v/, '');
-            if (manifest.version !== expectedSemver) {
-              core.setFailed(`Manifest version ${manifest.version} != expected ${expectedSemver}`); return;
-            }
-
-            const assetNames = new Set(release.assets.map((a) => a.name));
-            const errors = [];
-            for (const [platform, entry] of Object.entries(manifest.platforms ?? {})) {
-              if (!entry.signature) { errors.push(`${platform}: missing signature`); continue; }
-              if (!entry.url) { errors.push(`${platform}: missing url`); continue; }
-              const basename = decodeURIComponent(entry.url.split('/').pop());
-              if (!assetNames.has(basename)) errors.push(`${platform}: url points at missing asset ${basename}`);
-            }
-            if (errors.length) { core.setFailed(`Manifest verification failed:\n  - ${errors.join('\n  - ')}`); return; }
-            core.info(`Verified ${Object.keys(manifest.platforms).length} platforms in ${manifestName}.`);
+      # The script writes the full table itself; this only covers a run that
+      # died before it could (checkout failure, script crash).
+      - name: Summary (verification did not complete)
+        if: always() && steps.verify.outputs.summary_written != 'true'
+        env:
+          TAG: ${{ needs.create-release.outputs.version }}
+          OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          {
+            echo "## Release verification: ${TAG}"
+            echo
+            echo "Verification did not run to completion (verify step: ${OUTCOME:-not reached}). See the job log."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-release:
     needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release]
@@ -1522,6 +1548,7 @@ jobs:
     if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success'
     steps:
       - name: Publish release
+        id: publish
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
@@ -1535,6 +1562,14 @@ jobs:
             const owner = process.env.REL_OWNER;
             const repo = process.env.REL_NAME;
             const channel = process.env.CHANNEL;
+            // Re-read right before the flip: verify-release proved THIS draft, and
+            // anything that published or re-drafted it since (a manual click, a
+            // concurrent run) means what goes public is no longer what was verified.
+            const { data: current } = await github.rest.repos.getRelease({ owner, repo, release_id: Number(process.env.RELEASE_ID) });
+            if (current.draft !== true) {
+              core.setFailed(`Release ${current.tag_name} on ${owner}/${repo} is no longer a draft — it was published outside this run after verification; not touching it.`);
+              return;
+            }
             // `releases/latest` is what every stable updater polls, and GitHub's
             // default for make_latest is "the release published most recently" —
             // not the highest version. A hotfix on an older line published after a
@@ -1588,6 +1623,7 @@ jobs:
       # exactly what end users' updaters are. This can only pass when the
       # releases repo is PUBLIC (see the header note).
       - name: Smoke-test public URLs
+        id: public_urls
         env:
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           VERSION: ${{ needs.create-release.outputs.version }}
@@ -1614,6 +1650,7 @@ jobs:
       # maintains it. Runs after the draft flip so the manifest never points at
       # draft-only (404) asset URLs.
       - name: Mirror channel manifest to rolling release
+        id: mirror
         if: needs.create-release.outputs.channel != 'stable'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -1697,6 +1734,29 @@ jobs:
               owner, repo, release_id: rolling.id, name: 'latest.json', data: Buffer.from(download.data),
             });
             console.log(`Mirrored ${manifestName} to ${rollingTag}/latest.json`);
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ needs.create-release.outputs.version }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          PUBLISH: ${{ steps.publish.outcome }}
+          PUBLIC_URLS: ${{ steps.public_urls.outcome }}
+          MIRROR: ${{ steps.mirror.outcome }}
+        run: |
+          {
+            echo "## Publish: ${VERSION} (${CHANNEL})"
+            echo
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Draft flipped to published | ${PUBLISH:-not reached} |"
+            echo "| Manifest + platform URLs reachable anonymously | ${PUBLIC_URLS:-not reached} |"
+            echo "| Rolling latest-${CHANNEL} manifest updated | ${MIRROR:-not reached} |"
+            echo
+            echo "Release: https://github.com/${REL_OWNER}/${REL_NAME}/releases/tag/${VERSION}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Publish/refresh a Homebrew cask once the release is live. Stable releases
   # own "<product_name>"; alpha/beta own channel-suffixed "<product_name>@alpha"

@@ -18,7 +18,9 @@ Every push to `main` and every pull request runs `lint.yml`: actionlint (with
 shellcheck over each `run:` block) and zizmor. Run both locally before
 pushing — `actionlint` and `uvx zizmor .` from the repo root — and keep them at
 zero findings; an accepted zizmor finding goes in `.github/zizmor.yml` with
-its reason.
+its reason. Logic the workflows import from `scripts/` has unit tests:
+`node --test 'scripts/*.test.mjs'` (Node 24, no dependencies), also run by
+`lint.yml`.
 
 Lint cannot tell you the pipeline works. For that there is no test harness
 for a reusable workflow other than running it:

@@ -120,8 +120,10 @@ the update card states below.
 - Release body = the tag's CHANGELOG section (extracted by create-release) —
   it feeds the release page AND `update.body`.
 - Manifest `size` per platform; deterministic tag-path URLs (never draft
-  asset URLs); verify-release fails before publish on missing
-  signatures/platforms.
+  asset URLs); verify-release fails before publish unless the manifest covers
+  exactly the shipped platforms, every URL is on the serving repo's tag path,
+  and every signature equals its uploaded `.sig` and was made by the app's
+  `plugins.updater.pubkey` (see the README, "What verify-release proves").
 - Anti-patterns the pipeline structurally prevents: placeholder pubkeys
   (scaffold CI guard), GitHub-API-endpoint polling (rate limits), unsigned
   hand-rolled downloaders, mandatory startup update modals.

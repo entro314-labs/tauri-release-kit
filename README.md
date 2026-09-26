@@ -240,7 +240,37 @@ secrets and behind the environment's protection rules. Things to know:
 
 If you fork this kit into a **private** repo, callers additionally need
 workflow access: **Settings → Actions → General → Access → "Accessible from
-repositories in the … organization"**.
+repositories in the … organization"**. That setting covers the workflow files
+only. `release.yml` also checks out the kit's own `scripts/` at the commit you
+pinned (`job.workflow_repository` @ `job.workflow_sha`) with the caller's
+`GITHUB_TOKEN`, which cannot read another private repository — so a private
+fork's verify step fails at that checkout. Keep the kit repo public.
+
+## What verify-release proves
+
+Before the draft is published, `verify-release` runs
+[`scripts/verify-release.mjs`](scripts/verify-release.mjs) (unit-tested with
+`node --test`) against the draft through the API and fails the release, listing
+every problem at once, unless:
+
+- the release is still a draft, marked prerelease exactly when the channel is
+  alpha/beta;
+- the asset names are exactly what `targets` × `macos_bundles` /
+  `windows_bundles` / `linux_bundles` produce — a missing format *and* an
+  unexpected file both fail. Names are computed from `tauri.conf.json` and the
+  per-OS overlay (productName, rpm release, WiX languages), the way
+  tauri-action names its uploads. `.deb.sig`/`.rpm.sig` are allowed but not
+  required (older tauri CLIs do not write them);
+- every asset is non-empty and GitHub has computed its sha256 digest;
+- the update manifest has the tag's version, exactly the shipped platforms,
+  URLs under `https://github.com/<releases repo>/releases/download/<tag>/`
+  pointing at each platform's updater artifact, and signatures byte-identical
+  to the uploaded `.sig` files, made by the key in `plugins.updater.pubkey`
+  (the tauri CLI only warns when the signing key does not match it).
+
+The job's summary page shows a pass/fail table either way. `publish-release`
+re-reads the release immediately before flipping it and refuses if it is no
+longer a draft, then summarises the publish and the anonymous URL checks.
 
 ## Cost notes
 
