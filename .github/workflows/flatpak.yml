@@ -145,9 +145,11 @@ jobs:
             echo "::error::'$TAG' is not a semver release tag — pass the tag input explicitly when not running on a tag push"
             exit 1
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}"
+          } >> "$GITHUB_OUTPUT"
 
       # The .deb is the only input this workflow needs. A missing one is a
       # skip, not a failure: an app may deliberately ship AppImage-only on one
@@ -177,11 +179,13 @@ jobs:
           fi
           gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$RUNNER_TEMP"
           SHA=$(sha256sum "${RUNNER_TEMP}/${ASSET}" | cut -d' ' -f1)
-          echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
-          echo "path=${RUNNER_TEMP}/${ASSET}" >> "$GITHUB_OUTPUT"
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "url=https://github.com/${REPO}/releases/download/${TAG}/${ASSET}" >> "$GITHUB_OUTPUT"
+          {
+            echo "found=true"
+            echo "asset=$ASSET"
+            echo "path=${RUNNER_TEMP}/${ASSET}"
+            echo "sha256=$SHA"
+            echo "url=https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+          } >> "$GITHUB_OUTPUT"
           echo "Using $ASSET ($SHA)"
 
       - name: Install flatpak toolchain

@@ -527,7 +527,7 @@ jobs:
               || { echo "::error::Unknown target '$t' in targets input"; exit 1; }
           done
           for t in $BUILD_LIST; do
-            printf '%s\n' $TARGET_LIST | grep -qx -- "$t" \
+            printf '%s\n' "$TARGET_LIST" | grep -qx -- "$t" \
               || { echo "::error::build_targets entry '$t' is not in this app's targets set"; exit 1; }
           done
           # --- Bundle formats per OS -------------------------------------
@@ -538,14 +538,17 @@ jobs:
           # paid for); a format that merely CANNOT work on a given leg is
           # dropped with a warning, so one impossible combination never costs
           # an otherwise-shippable release.
-          ships() { printf '%s\n' $TARGET_LIST | grep -q "^$1-"; }
+          ships() { printf '%s\n' "$TARGET_LIST" | grep -q "^$1-"; }
           check_formats() {
             local os="$1" allowed="$2" required="$3" list="$4"
             for f in $list; do
-              printf '%s\n' $allowed | grep -qx -- "$f" \
-                || { echo "::error::Unknown ${os} bundle format '$f' (allowed: $(printf '%s ' $allowed))"; exit 1; }
+              # $allowed is space-separated, so match on padded words.
+              case " $allowed " in
+                *" $f "*) ;;
+                *) echo "::error::Unknown ${os} bundle format '$f' (allowed: ${allowed})"; exit 1 ;;
+              esac
             done
-            if ships "$os" && ! printf '%s\n' $list | grep -qx -- "$required"; then
+            if ships "$os" && ! printf '%s\n' "$list" | grep -qx -- "$required"; then
               echo "::error::${os} targets are shipped but '${required}' is missing from the ${os}_bundles input — the updater manifest cannot be built without it"
               exit 1
             fi
@@ -564,16 +567,16 @@ jobs:
           #   2. WiX has no ARM64 target at all.
           WIN_X64_LIST="$WIN_LIST"
           WIN_ARM_LIST="$WIN_LIST"
-          if printf '%s\n' $WIN_LIST | grep -qx msi; then
+          if printf '%s\n' "$WIN_LIST" | grep -qx msi; then
             if printf '%s' "${VERSION#v}" | grep -q -- '-'; then
               echo "::warning::Dropping the msi bundle for prerelease ${VERSION} — WiX rejects non-numeric semver pre-release identifiers. NSIS still ships on every Windows leg."
-              WIN_X64_LIST=$(printf '%s\n' $WIN_X64_LIST | grep -vx msi || true)
+              WIN_X64_LIST=$(printf '%s\n' "$WIN_X64_LIST" | grep -vx msi || true)
             fi
             echo "::warning::Dropping the msi bundle on windows-aarch64 — WiX cannot target ARM64. NSIS still ships there."
-            WIN_ARM_LIST=$(printf '%s\n' $WIN_ARM_LIST | grep -vx msi || true)
+            WIN_ARM_LIST=$(printf '%s\n' "$WIN_ARM_LIST" | grep -vx msi || true)
           fi
 
-          csv() { printf '%s\n' $1 | paste -sd, -; }
+          csv() { printf '%s\n' "$1" | paste -sd, -; }
           MAC_CSV=$(csv "$MAC_LIST"); WIN_X64_CSV=$(csv "$WIN_X64_LIST")
           WIN_ARM_CSV=$(csv "$WIN_ARM_LIST"); LIN_CSV=$(csv "$LIN_LIST")
 
@@ -584,13 +587,15 @@ jobs:
               elif .value.os_name == "windows" then (if .value.arch == "aarch64" then $winarm else $win end)
               else $lin end))')
 
-          MATRIX=$(printf '%s\n' $BUILD_LIST | jq -cRn --argjson legs "$LEGS" '{include: [inputs | $legs[.]]}')
-          echo "MATRIX=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "TARGETS=$(printf '%s\n' $TARGET_LIST | paste -sd, -)" >> "$GITHUB_OUTPUT"
-          echo "MACOS_BUNDLES=$MAC_CSV" >> "$GITHUB_OUTPUT"
-          echo "WINDOWS_BUNDLES=$WIN_X64_CSV" >> "$GITHUB_OUTPUT"
-          echo "LINUX_BUNDLES=$LIN_CSV" >> "$GITHUB_OUTPUT"
-          echo "Building: $(printf '%s\n' $BUILD_LIST | paste -sd, -) (shipping set: $(printf '%s\n' $TARGET_LIST | paste -sd, -))"
+          MATRIX=$(printf '%s\n' "$BUILD_LIST" | jq -cRn --argjson legs "$LEGS" '{include: [inputs | $legs[.]]}')
+          {
+            echo "MATRIX=$MATRIX"
+            echo "TARGETS=$(csv "$TARGET_LIST")"
+            echo "MACOS_BUNDLES=$MAC_CSV"
+            echo "WINDOWS_BUNDLES=$WIN_X64_CSV"
+            echo "LINUX_BUNDLES=$LIN_CSV"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building: $(csv "$BUILD_LIST") (shipping set: $(csv "$TARGET_LIST"))"
           echo "Bundles — macOS: ${MAC_CSV:-none}  Windows: ${WIN_X64_CSV:-none} (arm64: ${WIN_ARM_CSV:-none})  Linux: ${LIN_CSV:-none}"
 
   create-release:
@@ -607,11 +612,11 @@ jobs:
           VERSION: ${{ needs.check-changelog.outputs.version }}
         run: |
           if [[ "$VERSION" == *"-alpha"* ]]; then
-            echo "CHANNEL=alpha" >> $GITHUB_OUTPUT
+            echo "CHANNEL=alpha" >> "$GITHUB_OUTPUT"
           elif [[ "$VERSION" == *"-beta"* ]]; then
-            echo "CHANNEL=beta" >> $GITHUB_OUTPUT
+            echo "CHANNEL=beta" >> "$GITHUB_OUTPUT"
           else
-            echo "CHANNEL=stable" >> $GITHUB_OUTPUT
+            echo "CHANNEL=stable" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1515,7 +1520,7 @@ jobs:
           set -euo pipefail
           MANIFEST_NAME=$([ "$CHANNEL" = "stable" ] && echo latest.json || echo "latest-${CHANNEL}.json")
           URL="https://github.com/${REL_OWNER}/${REL_NAME}/releases/download/${VERSION}/${MANIFEST_NAME}"
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             CODE=$(curl -s -o /tmp/manifest.json -w '%{http_code}' -L -A release-verify "$URL") && [ "$CODE" = "200" ] && break
             sleep 10
           done
@@ -1845,9 +1850,11 @@ jobs:
           parts[2] = str(int(parts[2]) + 1)
           print('.'.join(parts))
           " "$BARE")
-          echo "BARE=$BARE" >> "$GITHUB_OUTPUT"
-          echo "NEXT=$NEXT" >> "$GITHUB_OUTPUT"
-          echo "BRANCH=chore/bump-version-${NEXT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "BARE=$BARE"
+            echo "NEXT=$NEXT"
+            echo "BRANCH=chore/bump-version-${NEXT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update version files
         env:

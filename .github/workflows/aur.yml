@@ -129,10 +129,12 @@ jobs:
           # prerelease tag maps to the underscore form Arch uses: 1.0.0-beta.1
           # becomes 1.0.0_beta.1, which still sorts correctly under vercmp.
           PKGVER="${VERSION//-/_}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "pkgver=$PKGVER" >> "$GITHUB_OUTPUT"
-          echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "pkgver=$PKGVER"
+            echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}"
+          } >> "$GITHUB_OUTPUT"
 
       # Sources and checksums come from the published release, so the PKGBUILD
       # is byte-accurate by construction rather than by hand-editing.
@@ -231,7 +233,10 @@ jobs:
               printf "sha256sums_%s=('%s')\n" "$ARCH" "$SHA"
             done
             printf '\npackage() {\n'
+            # These two lines are PKGBUILD source: $pkgdir must reach makepkg unexpanded.
+            # shellcheck disable=SC2016
             printf '  # The .deb layout maps 1:1 onto $pkgdir; nothing needs rewriting.\n'
+            # shellcheck disable=SC2016 # literal PKGBUILD source, as above
             printf '  tar -xf data.tar.* -C "${pkgdir}"\n'
             printf '}\n'
           } > "${WORK}/PKGBUILD"

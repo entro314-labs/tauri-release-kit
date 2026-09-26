@@ -118,7 +118,9 @@ jobs:
         shell: bash
         env:
           CLIPPY_ARGS: ${{ inputs.clippy_args }}
-        run: cargo clippy ${CLIPPY_ARGS:-} -- -D warnings
+        run: |
+          # shellcheck disable=SC2086 # CLIPPY_ARGS is a caller-supplied flag list; splitting it is the point
+          cargo clippy ${CLIPPY_ARGS:-} -- -D warnings
 
       - name: Rust tests
         if: inputs.run_tests
@@ -126,4 +128,6 @@ jobs:
         shell: bash
         env:
           TEST_ARGS: ${{ inputs.test_args }}
-        run: cargo test ${TEST_ARGS:-}
+        run: |
+          # shellcheck disable=SC2086 # TEST_ARGS is a caller-supplied flag list; splitting it is the point
+          cargo test ${TEST_ARGS:-}
