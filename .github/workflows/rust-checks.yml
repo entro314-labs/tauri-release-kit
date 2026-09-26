@@ -209,4 +209,7 @@ jobs:
             ARGS+=(--ignore "$id")
             echo "::notice::Ignoring ${id} (audit_ignore input)"
           done
-          cargo audit "${ARGS[@]}"
+          # The binary directly, not `cargo audit`: going through the cargo proxy
+          # would make rustup install the repo's pinned toolchain first, and
+          # auditing an existing Cargo.lock needs no toolchain at all.
+          cargo-audit audit "${ARGS[@]}"
