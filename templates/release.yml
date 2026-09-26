@@ -38,9 +38,13 @@ concurrency:
 jobs:
   release:
     uses: entro314-labs/tauri-release-kit/.github/workflows/release.yml@main
+    # The ceiling for every job in the kit's workflow: a job asking for more
+    # than this fails the WHOLE run at start-up, before any job runs.
     permissions:
       contents: write
-      pull-requests: write
+      pull-requests: write     # post-release version-bump PR
+      id-token: write          # build-provenance attestation (Sigstore)
+      attestations: write      # stores the attestation on this repo
     with:
       app_display_name: 'MyApp'        # ← release titles: "MyApp v1.0.0"
       project_path: 'apps/desktop'     # ← '.' for single-app repos

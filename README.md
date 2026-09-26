@@ -423,6 +423,14 @@ a bare runner. The logic lives in [`scripts/smoke-*`](scripts/).
 
 ## Checksums, SBOM and build provenance
 
+> **Existing callers must add two permissions.** The `attest` job needs
+> `id-token: write` and `attestations: write`, and a reusable workflow can
+> never exceed its caller's grant: without them GitHub rejects the whole
+> release run at start-up ("The nested job 'attest' is requesting
+> 'id-token: write', but is only allowed 'id-token: none'"), before any job
+> runs. Add both to the `release` job's `permissions:` in your caller, as
+> `templates/release.yml` now does.
+
 After the last leg uploads and before verification, the `checksums` job
 downloads every asset on the draft and publishes, alongside them:
 
