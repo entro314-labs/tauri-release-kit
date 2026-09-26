@@ -303,13 +303,20 @@ jobs:
       # --verifysource re-downloads every source URL and checks it against the
       # sha256sums: it catches a wrong URL or a stale checksum HERE, instead of
       # in the inbox of every Arch user whose update just failed.
+      #
+      # The image is pinned by digest (the multi-arch index of
+      # archlinux:base-devel as of 2026-09-26), so a re-pushed tag cannot
+      # change what runs here unseen; Dependabot does not see images inside
+      # `run:`. To bump: `docker buildx imagetools inspect archlinux:base-devel`
+      # and copy the top-level `Digest:`.
       - name: Validate in an Arch container
         env:
           WORK: ${{ steps.render.outputs.workdir }}
           PKGNAME: ${{ inputs.pkgname }}
+          ARCH_IMAGE: archlinux:base-devel@sha256:8745817f349ed24373341ddb92776209eeec3f0364ea48f7f645ac5800d30a50
         run: |
           set -euo pipefail
-          docker run --rm -v "${WORK}:/pkg" archlinux:base-devel bash -euo pipefail -c '
+          docker run --rm -v "${WORK}:/pkg" "$ARCH_IMAGE" bash -euo pipefail -c '
             pacman -Sy --noconfirm --needed pacman-contrib namcap >/dev/null 2>&1 || true
             useradd -m builder
             cp -r /pkg /home/builder/pkg

@@ -216,13 +216,10 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Cache Rust workspace
-        if: steps.prereq.outputs.ready == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: ${{ inputs.project_path }}/src-tauri
-          shared-key: appstore-${{ inputs.macos_target }}
-          cache-on-failure: true
+      # No Rust cache: this builds the signed binary Apple receives, from a
+      # release tag, and a tag run can only restore caches the default branch
+      # saved — anything able to write that key would feed target/ and
+      # ~/.cargo into a signed upload. Same reasoning as release.yml's legs.
 
       - name: Install dependencies
         if: steps.prereq.outputs.ready == 'true'
@@ -517,13 +514,10 @@ jobs:
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      - name: Cache Rust workspace
-        if: steps.prereq.outputs.ready == 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: ${{ inputs.project_path }}/src-tauri
-          shared-key: appstore-ios
-          cache-on-failure: true
+      # No Rust cache: this builds the signed binary Apple receives, from a
+      # release tag, and a tag run can only restore caches the default branch
+      # saved — anything able to write that key would feed target/ and
+      # ~/.cargo into a signed upload. Same reasoning as release.yml's legs.
 
       - name: Install dependencies
         if: steps.prereq.outputs.ready == 'true'
