@@ -210,8 +210,9 @@ attempt at the publish step, after all legs had built); calendar the renewal.
 
 `release.yml` takes an optional `environment` input. When set, every job that
 reads a signing or publishing secret (`check-changelog`, `create-release`,
-`build-and-release`, `create-updater-json`, `verify-release`,
-`publish-release`, `publish-homebrew-cask`) runs in that GitHub environment,
+`build-and-release`, `create-updater-json`, `checksums`, `attest`,
+`verify-release`, `publish-release`, `publish-homebrew-cask`) runs in that
+GitHub environment,
 so `TAURI_SIGNING_PRIVATE_KEY`, the Apple/Windows/Linux signing secrets,
 `RELEASES_TOKEN` and `HOMEBREW_TAP_TOKEN` can be moved out of repo-level
 secrets and behind the environment's protection rules. Things to know:
@@ -223,7 +224,7 @@ secrets and behind the environment's protection rules. Things to know:
   mechanism this relies on.
 - Protection rules apply per job: GitHub's docs say they must pass "before a
   job referencing the environment is sent to a runner". Expect a
-  required-reviewer rule to hold the pipeline at each of those seven jobs
+  required-reviewer rule to hold the pipeline at each of those jobs
   rather than once per release (unverified here — no live run). Deployment
   branch/tag rules must admit the release tags (`v*`) and the branch you
   dispatch retries from.
@@ -246,6 +247,27 @@ pinned (`job.workflow_repository` @ `job.workflow_sha`) with the caller's
 `GITHUB_TOKEN`, which cannot read another private repository — so a private
 fork's verify step fails at that checkout. Keep the kit repo public.
 
+## Checksums, SBOM and build provenance
+
+After the last leg uploads and before verification, the `checksums` job
+downloads every asset on the draft and publishes, alongside them:
+
+- `SHA256SUMS` — `sha256sum` output over every asset (installers, updater
+  archives, `.sig` files, the update manifest, the SBOMs);
+- `SHA256SUMS.asc` and `<KEY_ID>.asc` (the public key) — only when
+  `LINUX_GPG_PRIVATE_KEY` is set, signed with that same key;
+- `<productName>_<version>.spdx.json` and `.cdx.json` — a Syft SBOM of the
+  tagged source (every lockfile Syft recognises).
+
+Names and format match linux-release-kit. The `attest` job then records
+GitHub build provenance for every file in `SHA256SUMS`. It is stored on the
+**app** repository even when releases live on `releases_repo`, and is only
+available for public repositories unless the org is on GitHub Enterprise
+Cloud — on a private Free/Pro/Team repo it fails with a warning and the
+release continues. How to verify each of these: [docs/SIGNING.md
+§ 5](docs/SIGNING.md#5-checksums-sbom-and-build-provenance). The `.flatpak`
+bundle `flatpak.yml` attaches after publish is not in `SHA256SUMS`.
+
 ## What verify-release proves
 
 Before the draft is published, `verify-release` runs
@@ -261,7 +283,8 @@ every problem at once, unless:
   per-OS overlay (productName, rpm release, WiX languages), the way
   tauri-action names its uploads. `.deb.sig`/`.rpm.sig` are allowed but not
   required (older tauri CLIs do not write them);
-- every asset is non-empty and GitHub has computed its sha256 digest;
+- every asset is non-empty and GitHub has computed its sha256 digest, and
+  that digest equals the asset's line in `SHA256SUMS`;
 - the update manifest has the tag's version, exactly the shipped platforms,
   URLs under `https://github.com/<releases repo>/releases/download/<tag>/`
   pointing at each platform's updater artifact, and signatures byte-identical

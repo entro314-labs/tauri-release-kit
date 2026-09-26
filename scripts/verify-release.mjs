@@ -21,6 +21,9 @@
  *     envelope, and was made by the key whose public half the app ships
  *     (plugins.updater.pubkey) — the tauri CLI only warns about a mismatched key, and a
  *     mismatch breaks every installed copy's next update
+ *   - SHA256SUMS (written by the checksums job) lists every asset except itself and the
+ *     *.asc files, and GitHub's digest of each asset equals its line — which catches an
+ *     asset re-uploaded by a retried leg after the sums were written
  *
  * Expected asset names are computed, never listed per app. They follow tauri-action v1's
  * naming (it uploads only files at the paths it predicts, so its prediction IS the upload
@@ -31,6 +34,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /** Per-target architecture tokens tauri-action puts in each format's file name. */
 export const TARGETS = {
@@ -112,7 +116,10 @@ export function appNaming({ base, overlays, cargoName }) {
     return ghAssetName(name)
   }
   const release = pick('linux', (c) => c?.bundle?.linux?.rpm?.release)
+  const baseName = base?.productName ?? cargoName
   return {
+    // The un-overlaid name, for release-wide files (the SBOMs).
+    product: baseName ? ghAssetName(baseName) : product('darwin'),
     darwin: { product: product('darwin') },
     windows: { product: product('windows'), wixLanguages: wixLanguages(pick('windows', (c) => c?.bundle?.windows?.wix?.language)) },
     linux: { product: product('linux'), rpmRelease: release ? String(release) : '1' },
@@ -309,13 +316,52 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
 }
 
 /**
+ * The release-wide files the checksums job adds: SHA256SUMS, the two SBOMs, and — when the
+ * Linux GPG key is configured — SHA256SUMS.asc plus the public key as <KEY_ID>.asc.
+ * @param {{ product: string, version: string, signingKeyId?: string }} input
+ */
+export function checksumAssets({ product, version, signingKeyId }) {
+  const names = ['SHA256SUMS', `${product}_${version}.spdx.json`, `${product}_${version}.cdx.json`]
+  if (signingKeyId) names.push('SHA256SUMS.asc', `${signingKeyId}.asc`)
+  return names
+}
+
+/**
+ * Compares SHA256SUMS (`<hex>  <name>` lines, sha256sum's format) with the release's assets.
+ * Every asset except SHA256SUMS and *.asc must have a line, every line must name an asset,
+ * and GitHub's digest must equal the listed hash.
+ * @param {string} text
+ * @param {{ name: string, digest?: string | null }[]} assets
+ * @returns {string[]} problems
+ */
+export function checkSums(text, assets) {
+  const sums = new Map()
+  for (const line of text.split('\n')) {
+    const m = /^([a-f0-9]{64}) [ *](.+)$/.exec(line)
+    if (m) sums.set(m[2], m[1])
+  }
+  const byName = new Map(assets.map((a) => [a.name, a]))
+  const bad = []
+  for (const [name, hash] of sums) {
+    const a = byName.get(name)
+    if (!a) bad.push(`${name} (listed, not on the release)`)
+    else if (a.digest && a.digest !== `sha256:${hash}`) bad.push(`${name} (${a.digest} ≠ sha256:${hash})`)
+  }
+  for (const a of assets) {
+    if (a.name !== 'SHA256SUMS' && !a.name.endsWith('.asc') && !sums.has(a.name)) bad.push(`${a.name} (not in SHA256SUMS)`)
+  }
+  return bad
+}
+
+/**
  * Every verification row, from already-fetched data.
  * @param {{ release: any, channel: string, version: string, expected: { required: string[], optional: string[] },
  *   manifest: any, manifestError?: string, targets: string[], downloadBase: string,
- *   naming: ReturnType<typeof appNaming>, sigFiles: Map<string, string> }} input
+ *   naming: ReturnType<typeof appNaming>, sigFiles: Map<string, string>, sums: string | null }} input
+ *   `sums` is SHA256SUMS' content, null when it is not on the release.
  * @returns {{ name: string, ok: boolean, detail: string }[]}
  */
-export function buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles }) {
+export function buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums }) {
   const rows = []
   const row = (name, bad, what) => rows.push({ name, ok: bad.length === 0, detail: bad.length ? `${what}: ${list(bad)}` : 'ok' })
   const wantPrerelease = channel !== 'stable'
@@ -329,6 +375,7 @@ export function buildChecks({ release, channel, version, expected, manifest, man
   const { empty, noDigest } = assetIntegrity(release.assets)
   row('no empty assets', empty, 'size 0')
   row('GitHub sha256 digest present', noDigest, 'no digest yet')
+  row('digests match SHA256SUMS', sums === null ? ['SHA256SUMS is not on the release'] : checkSums(sums, release.assets), 'mismatch')
 
   if (manifestError) {
     for (const name of ['manifest version', 'manifest platforms = targets', 'updater URLs', 'signatures match .sig files', 'signatures are minisign, by the app key']) {
@@ -378,7 +425,8 @@ export function renderSummary({ tag, releaseUrl, assetCount, platformCount, chec
 /**
  * Entry point for actions/github-script. Reads its inputs from the environment:
  * RELEASE_ID, REL_OWNER, REL_NAME, TAG, CHANNEL, TARGETS, MACOS_BUNDLES, WINDOWS_BUNDLES,
- * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout).
+ * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout), SUMS_KEY_ID (the key that signed
+ * SHA256SUMS; empty when unsigned).
  */
 export async function run({ github, core, env, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const owner = env.REL_OWNER
@@ -395,6 +443,7 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
     targets,
     bundles: { macos: csv(env.MACOS_BUNDLES), windows: csv(env.WINDOWS_BUNDLES), linux: csv(env.LINUX_BUNDLES) },
     naming,
+    extra: checksumAssets({ product: naming.product, version, signingKeyId: env.SUMS_KEY_ID || undefined }),
   })
   // URLs are built from the tag path, never a draft's browser_download_url (docs/GOTCHAS.md).
   const downloadBase = `https://github.com/${owner}/${repo}/releases/download/${tag}/`
@@ -412,6 +461,8 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
     for (const a of release.assets.filter((x) => x.name.endsWith('.sig'))) sigFiles.set(a.name, await download(a))
     let manifest = null
     let manifestError
+    const sumsAsset = release.assets.find((a) => a.name === 'SHA256SUMS')
+    const sums = sumsAsset ? await download(sumsAsset) : null
     const manifestAsset = release.assets.find((a) => a.name === manifestName(channel))
     if (!manifestAsset) manifestError = `${manifestName(channel)} is not on the release`
     else {
@@ -421,7 +472,7 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
         manifestError = `${manifestName(channel)} is not valid JSON: ${error.message}`
       }
     }
-    const checks = buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles })
+    const checks = buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums })
     return { release, manifest, checks }
   }
 
@@ -457,4 +508,15 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
     return
   }
   core.info(`Verified ${release.assets.length} assets and ${targets.length} updater platforms on ${owner}/${repo} ${tag}.`)
+}
+
+// CLI: `node verify-release.mjs product <src-tauri dir>` prints the name the SBOMs are
+// published under, so the checksums job names them exactly as verification expects.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const [command, dir] = process.argv.slice(2)
+  if (command !== 'product' || !dir) {
+    console.error('usage: node verify-release.mjs product <src-tauri dir>')
+    process.exit(2)
+  }
+  console.log(loadAppNaming(dir).product)
 }

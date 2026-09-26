@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,8 @@ import {
   buildChecks,
   cargoPackageName,
   checkManifest,
+  checkSums,
+  checksumAssets,
   compareAssets,
   expectedAssets,
   ghAssetName,
@@ -203,6 +206,11 @@ test('checkManifest: missing .sig asset, non-minisign signature, extra platform'
   assert.deepEqual(r.envelopes, ['linux-x86_64: signature is not a minisign envelope'])
 })
 
+const ZERO = '0'.repeat(64)
+function sumsFor(names) {
+  return names.filter((n) => n !== 'SHA256SUMS' && !n.endsWith('.asc')).map((n) => `${ZERO}  ${n}`).join('\n') + '\n'
+}
+
 function releaseFor(names, extra = {}) {
   return {
     draft: true,
@@ -220,9 +228,10 @@ test('buildChecks: a complete release passes every row', () => {
   const rows = buildChecks({
     release: releaseFor(expected.required), channel: 'stable', version: '1.2.3', expected,
     manifest: goodManifest(targets), targets, downloadBase: BASE, naming, sigFiles: goodSigs(targets),
+    sums: sumsFor(expected.required),
   })
   assert.ok(rows.every((r) => r.ok), JSON.stringify(rows.filter((r) => !r.ok)))
-  assert.equal(rows.length, 11)
+  assert.equal(rows.length, 12)
 })
 
 test('buildChecks: published, wrong prerelease flag, unreadable manifest', () => {
@@ -230,12 +239,13 @@ test('buildChecks: published, wrong prerelease flag, unreadable manifest', () =>
   const expected = expectedAssets({ version: '1.2.3', channel: 'beta', targets, bundles: DEFAULT_BUNDLES, naming })
   const rows = buildChecks({
     release: releaseFor(expected.required, { draft: false }), channel: 'beta', version: '1.2.3', expected,
-    manifest: null, manifestError: 'latest-beta.json is not valid JSON', targets, downloadBase: BASE, naming, sigFiles: new Map(),
+    manifest: null, manifestError: 'latest-beta.json is not valid JSON', targets, downloadBase: BASE, naming, sigFiles: new Map(), sums: null,
   })
   const failed = rows.filter((r) => !r.ok).map((r) => r.name)
   assert.deepEqual(failed, [
     'still a draft',
     'prerelease flag matches channel',
+    'digests match SHA256SUMS',
     'manifest version',
     'manifest platforms = targets',
     'updater URLs',
@@ -280,11 +290,11 @@ function runFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'rk-run-'))
   writeFileSync(join(dir, 'tauri.conf.json'), JSON.stringify({ productName: 'MyApp', plugins: { updater: { pubkey: PUBKEY } } }))
   const targets = ['linux-x86_64']
-  const names = ['latest.json', 'MyApp_1.2.3_amd64.AppImage', 'MyApp_1.2.3_amd64.AppImage.sig']
-  const contents = new Map([[0, JSON.stringify(goodManifest(targets))], [2, SIG]])
+  const names = ['latest.json', 'MyApp_1.2.3_amd64.AppImage', 'MyApp_1.2.3_amd64.AppImage.sig', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS']
+  const contents = new Map([[0, JSON.stringify(goodManifest(targets))], [2, SIG], [5, sumsFor(names)]])
   const env = {
     RELEASE_ID: '7', REL_OWNER: 'org', REL_NAME: 'myapp-releases', TAG: 'v1.2.3', CHANNEL: 'stable',
-    TARGETS: 'linux-x86_64', MACOS_BUNDLES: '', WINDOWS_BUNDLES: '', LINUX_BUNDLES: 'appimage', SRC_TAURI: dir,
+    TARGETS: 'linux-x86_64', MACOS_BUNDLES: '', WINDOWS_BUNDLES: '', LINUX_BUNDLES: 'appimage', SRC_TAURI: dir, SUMS_KEY_ID: '',
   }
   return { names, contents, env }
 }
@@ -303,11 +313,43 @@ test('run: verifies through the Octokit client and writes the summary', async ()
 test('run: re-reads eight times, then fails with every broken check in the summary', async () => {
   const { names, contents, env } = runFixture()
   let reads = 0
-  const github = fakeGithub(() => { reads += 1; return releaseFor(names.slice(0, 2)) }, contents)
+  const github = fakeGithub(() => { reads += 1; return releaseFor(names.filter((n) => !n.endsWith('.sig'))) }, contents)
   const { core, out } = fakeCore()
   await run({ github, core, env, sleep: async () => {} })
   assert.equal(reads, 8)
   assert.match(out.failed, /expected assets present: missing: MyApp_1.2.3_amd64.AppImage.sig/)
   assert.match(out.failed, /signatures match .sig files/)
   assert.match(out.summary, /\*\*FAIL\*\*/)
+})
+
+test('checksumAssets adds the signature and public key only when signed', () => {
+  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3' }), ['SHA256SUMS', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json'])
+  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signingKeyId: 'ABCD' }).slice(3), ['SHA256SUMS.asc', 'ABCD.asc'])
+})
+
+test('checkSums: unlisted asset, listed-but-absent file, digest drift; .asc and SUMS exempt', () => {
+  const d = (c) => `sha256:${c.repeat(64)}`
+  const assets = [
+    { name: 'a.dmg', digest: d('1') },
+    { name: 'b.exe', digest: d('2') },
+    { name: 'c.deb', digest: d('3') },
+    { name: 'SHA256SUMS', digest: d('4') },
+    { name: 'SHA256SUMS.asc', digest: d('5') },
+    { name: 'KEY.asc', digest: d('6') },
+  ]
+  const text = `${'1'.repeat(64)}  a.dmg\n${'9'.repeat(64)} *b.exe\n${'7'.repeat(64)}  gone.rpm\n`
+  assert.deepEqual(checkSums(text, assets), [
+    `b.exe (${d('2')} ≠ sha256:${'9'.repeat(64)})`,
+    'gone.rpm (listed, not on the release)',
+    'c.deb (not in SHA256SUMS)',
+  ])
+})
+
+test('CLI prints the SBOM product name', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rk-cli-'))
+  writeFileSync(join(dir, 'tauri.conf.json'), JSON.stringify({ productName: 'My App' }))
+  writeFileSync(join(dir, 'tauri.macos.conf.json'), JSON.stringify({ productName: 'Mac Only' }))
+  const script = new URL('./verify-release.mjs', import.meta.url).pathname
+  assert.equal(execFileSync(process.execPath, [script, 'product', dir], { encoding: 'utf8' }), 'My.App\n')
+  assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }))
 })

@@ -451,7 +451,43 @@ missing group — only for a *half-configured* one.
 
 ---
 
-## 5. What runs in CI
+## 5. Checksums, SBOM and build provenance
+
+Every release carries `SHA256SUMS` over all of its assets, and — when
+`LINUX_GPG_PRIVATE_KEY` is configured — `SHA256SUMS.asc` plus the signing
+key's public half as `<KEY_ID>.asc`. A user checks a download with:
+
+```bash
+gpg --import <KEY_ID>.asc                  # once; confirm the fingerprint out of band
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
+```
+
+`<productName>_<version>.spdx.json` and `.cdx.json` are Syft SBOMs of the
+tagged source, listed in (and so signed through) `SHA256SUMS`.
+
+**Build provenance.** The `attest` job runs `actions/attest-build-provenance`
+over every file in `SHA256SUMS`. The attestation is stored on the repository
+that RAN the workflow — the app repo — even when the files are downloaded from
+a `releases_repo` mirror, and it is signed by this kit's reusable workflow,
+not by the app's caller. Both facts show up in the verify command:
+
+```bash
+gh attestation verify MyApp_1.0.0_aarch64.dmg \
+  --repo my-org/myapp \
+  --signer-repo entro314-labs/tauri-release-kit   # or your fork of the kit
+```
+
+Without `--signer-repo` (or `--signer-workflow`) verification fails, because
+`gh` expects the signer to be the app repo's own workflow. For a private app
+repo, `gh` needs a token that can read that repo's attestations.
+
+GitHub documents artifact attestations as available for public repositories
+on every current plan, and for private or internal repositories only on
+GitHub Enterprise Cloud. On a private Free/Pro/Team app repo the attest step
+fails; the kit reports that as a warning and publishes without provenance.
+
+## 6. What runs in CI
 
 The kit's `.github/workflows/release.yml`:
 
@@ -474,6 +510,9 @@ The kit's `.github/workflows/release.yml`:
   Linux. Signing that silently did nothing is caught before publish.
 - `check-changelog` blocks the release unless `CHANGELOG.md` has a heading for
   the tag being released.
+- `checksums` writes (and, with the Linux key, signs) `SHA256SUMS` and the
+  SBOMs; `attest` records build provenance; `verify-release` checks every
+  asset's GitHub digest against `SHA256SUMS` before publish.
 
 ### Local verification
 

@@ -1454,6 +1454,199 @@ jobs:
             });
             console.log(`Uploaded ${manifestName} for channel ${channel}`);
 
+  # One SHA256SUMS over every asset on the draft (all legs, including ones a
+  # previous attempt uploaded, plus the updater manifest and the SBOMs),
+  # GPG-signed when LINUX_GPG_PRIVATE_KEY is set. Same file names and format
+  # as linux-release-kit's checksums job. It runs after the last leg and after
+  # create-updater-json, so nothing it lists changes before publish — and if a
+  # retried leg re-uploads afterwards, verify-release catches the digest drift.
+  checksums:
+    needs: [check-changelog, create-release, build-and-release, create-updater-json]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    # Downloads from and uploads to the draft (same-repo mode).
+    permissions:
+      contents: write
+    if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
+    outputs:
+      key_id: ${{ steps.sign.outputs.key_id }}
+    steps:
+      # The SBOM describes the tagged source, the same ref the legs built.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag || github.ref }}
+          path: app
+
+      - name: Check out the kit's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-kit
+          persist-credentials: false
+
+      - name: Confirm the kit checkout
+        run: |
+          test -f .release-kit/scripts/verify-release.mjs \
+            || { echo "::error::The kit checkout did not resolve (job.workflow_repository/job.workflow_sha) — no scripts/verify-release.mjs"; exit 1; }
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      # A source-level SBOM (every locked dependency Syft recognises —
+      # Cargo.lock, pnpm-lock.yaml, …) in both formats scanners ingest,
+      # generated before SHA256SUMS so the sums and their signature cover it.
+      # Named <productName>_<version> by the same code verify-release uses.
+      - name: Generate SBOM
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
+          BARE_VERSION: ${{ needs.check-changelog.outputs.version }}
+        run: |
+          set -euo pipefail
+          BARE="${BARE_VERSION#v}"
+          PRODUCT="$(node .release-kit/scripts/verify-release.mjs product "$SRC_TAURI")"
+          SBOM="${RUNNER_TEMP}/sbom"
+          mkdir -p "$SBOM"
+          "$SYFT" scan dir:app --source-name "$PRODUCT" --source-version "$BARE" \
+            -o "spdx-json=${SBOM}/${PRODUCT}_${BARE}.spdx.json" \
+            -o "cyclonedx-json=${SBOM}/${PRODUCT}_${BARE}.cdx.json"
+          ls -l "$SBOM"
+
+      # The same key the Linux legs sign the AppImage and RPM with. Unset is a
+      # legitimate release (the sums still ship, unsigned); a key that will not
+      # import or sign fails the job.
+      - name: Import signing key
+        id: sign
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LINUX_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::notice::No LINUX_GPG_PRIVATE_KEY — SHA256SUMS ships unsigned."
+            echo "key_id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEY_FILE="${RUNNER_TEMP}/linux-signing.asc"
+          if printf '%s' "$LINUX_GPG_PRIVATE_KEY" | grep -q 'BEGIN PGP PRIVATE KEY'; then
+            printf '%s\n' "$LINUX_GPG_PRIVATE_KEY" > "$KEY_FILE"
+          elif printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode 2>/dev/null | grep -q 'BEGIN PGP PRIVATE KEY'; then
+            printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode > "$KEY_FILE"
+          else
+            echo "::error::LINUX_GPG_PRIVATE_KEY is neither an ASCII-armored private key nor base64 of one."
+            exit 1
+          fi
+          # Loopback pinentry, or gpg blocks on a passphrase prompt until the timeout.
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo 'allow-loopback-pinentry' >> ~/.gnupg/gpg-agent.conf
+          echo 'pinentry-mode loopback' >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+          gpg --batch --yes ${LINUX_GPG_PASSPHRASE:+--passphrase "$LINUX_GPG_PASSPHRASE"} --import "$KEY_FILE"
+          rm -f "$KEY_FILE"
+          KEY_ID="${LINUX_GPG_KEY_ID:-$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')}"
+          [ -n "$KEY_ID" ] || { echo "::error::No secret key present after import"; exit 1; }
+          printf '%s:6:\n' "$KEY_ID" | gpg --batch --import-ownertrust
+          echo "key_id=${KEY_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate, sign and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ needs.check-changelog.outputs.version }}
+          KEY_ID: ${{ steps.sign.outputs.key_id }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/sums"
+          mkdir -p "$WORK" && cd "$WORK"
+          # By asset id: draft assets have no public URL. SHA256SUMS, its
+          # signature, the public key and the SBOMs are regenerated below, so a
+          # retry run's copies from the previous attempt are not summed.
+          gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | [.id, .name] | @tsv' > "${RUNNER_TEMP}/assets.tsv"
+          while IFS=$'\t' read -r id name; do
+            case "$name" in SHA256SUMS|*.asc|*.spdx.json|*.cdx.json) continue ;; esac
+            gh api -H 'Accept: application/octet-stream' "repos/${REPO}/releases/assets/${id}" > "$name"
+          done < "${RUNNER_TEMP}/assets.tsv"
+          cp "${RUNNER_TEMP}"/sbom/* .
+          set -- *
+          [ -e "$1" ] || { echo "::error::No assets on ${REPO}@${TAG} to checksum"; exit 1; }
+          sha256sum -- "$@" > SHA256SUMS
+          cat SHA256SUMS
+          UPLOAD=(SHA256SUMS "${RUNNER_TEMP}"/sbom/*)
+          if [ -n "$KEY_ID" ]; then
+            gpg --batch --yes -u "$KEY_ID" ${LINUX_GPG_PASSPHRASE:+--passphrase "$LINUX_GPG_PASSPHRASE"} \
+              --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
+            gpg --verify SHA256SUMS.asc SHA256SUMS
+            # The public key next to the artifacts, so verification instructions
+            # can point at a URL that moves with the release.
+            gpg --armor --export "$KEY_ID" > "${KEY_ID}.asc"
+            UPLOAD+=(SHA256SUMS.asc "${KEY_ID}.asc")
+          fi
+          gh release upload "$TAG" "${UPLOAD[@]}" --repo "$REPO" --clobber
+
+  # Build provenance for every file SHA256SUMS lists, once, after the last
+  # asset is on the draft — one job holding id-token instead of one per leg.
+  # The attestation is stored on the repository RUNNING this workflow (the
+  # app repo), even when releases live on releases_repo; verify with
+  # `gh attestation verify <file> --repo <app repo> --signer-repo <this kit>`
+  # (docs/SIGNING.md). --signer-repo is required because a reusable workflow
+  # signs.
+  #
+  # GitHub offers attestations for public repositories on every plan, but for
+  # private/internal ones only on Enterprise Cloud. A private app repo on
+  # Free/Pro/Team therefore fails the attest call; that is a plan limit, not a
+  # broken release, so it is a warning and the release proceeds.
+  attest:
+    needs: [check-changelog, create-release, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write        # SHA256SUMS is read from the still-draft release
+      id-token: write        # Sigstore signing certificate
+      attestations: write    # store the attestation on this repository
+    steps:
+      - name: Download SHA256SUMS
+        env:
+          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          ID="$(gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets?per_page=100" --jq '.[] | select(.name == "SHA256SUMS") | .id')"
+          [ -n "$ID" ] || { echo "::error::SHA256SUMS is not on the draft"; exit 1; }
+          mkdir -p "${RUNNER_TEMP}/attest"
+          gh api -H 'Accept: application/octet-stream' "repos/${REPO}/releases/assets/${ID}" > "${RUNNER_TEMP}/attest/SHA256SUMS"
+          cat "${RUNNER_TEMP}/attest/SHA256SUMS"
+
+      - name: Attest build provenance
+        id: attest
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/attest/SHA256SUMS
+
+      - name: Report attestation outcome
+        env:
+          OUTCOME: ${{ steps.attest.outcome }}
+          PRIVATE: ${{ github.event.repository.private }}
+          KIT: ${{ job.workflow_repository }}
+        run: |
+          if [ "$OUTCOME" = "success" ]; then
+            echo "::notice::Build provenance attested for every file in SHA256SUMS (stored on ${GITHUB_REPOSITORY}). Verify with: gh attestation verify <file> --repo ${GITHUB_REPOSITORY} --signer-repo ${KIT}"
+          elif [ "$PRIVATE" = "true" ]; then
+            echo "::warning::Artifact attestation failed on private ${GITHUB_REPOSITORY}. Private repositories get attestations only on GitHub Enterprise Cloud; on Free/Pro/Team this is expected. The release continues without provenance."
+          else
+            echo "::warning::Artifact attestation failed on public ${GITHUB_REPOSITORY} (see the step above). The release continues without provenance."
+          fi
+
   verify-release:
     # Fail loud BEFORE the draft flips public. The checks live in the kit's
     # scripts/verify-release.mjs (unit-tested, see its header for the list):
@@ -1462,7 +1655,7 @@ jobs:
     # GitHub sha256 digest, and the updater manifest must cover exactly the
     # shipped platforms with URLs on the serving repo's tag path and signatures
     # byte-identical to the uploaded .sig files, made by the app's own pubkey.
-    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json]
+    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json, checksums]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
@@ -1470,7 +1663,7 @@ jobs:
     # the REST API lists drafts only to tokens with push access.
     permissions:
       contents: write
-    if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
+    if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.checksums.result == 'success'
     steps:
       # The app's tauri.conf.json + per-OS overlays name the assets
       # (productName, rpm release, WiX languages) and carry the updater pubkey.
@@ -1516,6 +1709,7 @@ jobs:
           WINDOWS_BUNDLES: ${{ needs.plan.outputs.windows_bundles }}
           LINUX_BUNDLES: ${{ needs.plan.outputs.linux_bundles }}
           SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
+          SUMS_KEY_ID: ${{ needs.checksums.outputs.key_id }}
         with:
           github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
@@ -1538,14 +1732,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-release:
-    needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release]
+    needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ inputs.environment }}
     # Flips the draft public and maintains the rolling latest-<channel> release.
     permissions:
       contents: write
-    if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success'
+    # attest never fails the release on its own (continue-on-error on the
+    # attest step); it still has to have run, so provenance precedes publish.
+    if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success' && needs.attest.result == 'success'
     steps:
       - name: Publish release
         id: publish
