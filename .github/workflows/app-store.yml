@@ -148,10 +148,17 @@ on:
         description: 'base64 of the "App Store Connect" .mobileprovision (manual iOS signing)'
         required: false
 
+# Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
+permissions:
+  contents: read
+
 jobs:
   macos:
     if: inputs.macos
     runs-on: ${{ inputs.macos_runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       # Fail (or skip) before the ~15 minutes of universal-binary compilation,
       # not after.
@@ -458,6 +465,9 @@ jobs:
   ios:
     if: inputs.ios
     runs-on: ${{ inputs.ios_runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       - name: Check credentials
         id: prereq

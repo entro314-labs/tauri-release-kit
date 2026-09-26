@@ -104,6 +104,10 @@ on:
         description: 'Fine-grained PAT with Contents:RW on releases_repo. Required when releases_repo is set.'
         required: false
 
+# Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
+permissions:
+  contents: read
+
 jobs:
   flatpak:
     strategy:
@@ -111,6 +115,10 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    # gh release upload of the bundle, in same-repo mode.
+    permissions:
+      contents: write
     steps:
       # Flatpak cannot cross-build: an aarch64 Flatpak needs an aarch64
       # runner. The matrix always has both entries (a matrix cannot be

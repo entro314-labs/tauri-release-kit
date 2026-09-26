@@ -336,12 +336,19 @@ on:
         description: 'Optional: exported to the build for sourcemap/symbol upload tooling (non-empty only)'
         required: false
 
+# Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
+permissions:
+  contents: read
+
 jobs:
   # Fail fast: no CHANGELOG entry for the tag (or a missing cross-repo token)
   # → no matrix spin-up. macOS runners bill 10× on private repos; every gate
   # that can run on ubuntu first, does.
   check-changelog:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read   # checkout only
     outputs:
       version: ${{ steps.resolved.outputs.VERSION }}
       # 'owner name' pair resolved once; jobs re-split it (expressions have no split()).
@@ -449,6 +456,9 @@ jobs:
   # — rustup still honors the repo's pinned rust-toolchain.toml.
   rust-fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -475,6 +485,9 @@ jobs:
   plan:
     needs: check-changelog
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Computes the matrix from inputs; touches no API.
+    permissions: {}
     outputs:
       matrix: ${{ steps.plan.outputs.MATRIX }}
       targets: ${{ steps.plan.outputs.TARGETS }}
@@ -603,6 +616,10 @@ jobs:
   create-release:
     needs: check-changelog
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Creates (or reuses) the draft when releases_repo is empty.
+    permissions:
+      contents: write
     outputs:
       release_id: ${{ steps.create-release.outputs.result }}
       version: ${{ needs.check-changelog.outputs.version }}
@@ -720,6 +737,10 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 180
+    # tauri-action uploads assets to the draft in same-repo mode.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1302,6 +1323,10 @@ jobs:
   create-updater-json:
     needs: [check-changelog, create-release, build-and-release, plan]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Reads the draft's assets and uploads the manifest to it.
+    permissions:
+      contents: write
     if: always() && needs.build-and-release.result == 'success'
     steps:
       - name: Generate updater JSON
@@ -1408,6 +1433,11 @@ jobs:
     # 404 download URLs before users see a broken update prompt.
     needs: [check-changelog, create-release, build-and-release, create-updater-json]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Read-only in intent, but in same-repo mode it reads a DRAFT release, and
+    # the REST API lists drafts only to tokens with push access.
+    permissions:
+      contents: write
     if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
     steps:
       # Pre-publish verification must go through the API: draft-release assets
@@ -1460,6 +1490,10 @@ jobs:
   publish-release:
     needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Flips the draft public and maintains the rolling latest-<channel> release.
+    permissions:
+      contents: write
     if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success'
     steps:
       - name: Publish release
@@ -1647,6 +1681,9 @@ jobs:
   publish-homebrew-cask:
     needs: [check-changelog, create-release, publish-release, plan]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Pushes with HOMEBREW_TAP_TOKEN and hashes public assets; no GITHUB_TOKEN use.
+    permissions: {}
     if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
     steps:
       - name: Check cask prerequisites
@@ -1838,6 +1875,7 @@ jobs:
     # flipped public must not open a bump PR for a version nobody can install.
     needs: [create-release, build-and-release, publish-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.post_release_bump
     permissions:
       contents: write

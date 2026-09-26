@@ -39,6 +39,7 @@ jobs:
   commits:
     name: Commit lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # A pull request is the only event carrying a title to check. On a push there is
     # nothing to gate that has not already landed.
     if: github.event_name == 'pull_request'

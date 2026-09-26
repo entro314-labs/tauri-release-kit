@@ -108,9 +108,17 @@ on:
         description: 'Fine-grained PAT with Contents:Read on releases_repo, when that repo is private'
         required: false
 
+# Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
+permissions:
+  contents: read
+
 jobs:
   aur:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # gh release view/download only; publishing goes over SSH to the AUR.
+    permissions:
+      contents: read
     steps:
       - name: Resolve release
         id: rel
