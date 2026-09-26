@@ -143,6 +143,14 @@ jobs:
   #     DELETE this job if you don't submit to the App Store.
   app-store:
     needs: release
+    # One App Store upload at a time for this app, across ALL tags. The
+    # workflow-level group above only serialises runs of the same tag. Two
+    # releases in flight with a pinned bundle.{macOS,iOS}.bundleVersion (see
+    # docs/APP_STORE.md, "Bundle version") upload the same build number, and
+    # App Store Connect rejects the second after its full build.
+    concurrency:
+      group: app-store-${{ github.repository }}
+      cancel-in-progress: false
     uses: entro314-labs/tauri-release-kit/.github/workflows/app-store.yml@main
     with:
       project_path: 'apps/desktop'

@@ -149,6 +149,9 @@ overloading it here would be worse.
 ```yaml
   app-store:
     needs: release
+    concurrency:                   # one upload at a time, across tags
+      group: app-store-${{ github.repository }}
+      cancel-in-progress: false
     uses: entro314-labs/tauri-release-kit/.github/workflows/app-store.yml@main
     with:
       project_path: 'apps/desktop'
@@ -164,6 +167,18 @@ checks — entitlements, provisioning profile, Info.plist, signature chain —
 without consuming a build number or creating a TestFlight entry. Every
 mistake in this document surfaces there, and you can iterate freely. Flip it
 off when validation passes.
+
+Keep the job-level `concurrency` group. The caller's workflow-level group is
+keyed on the tag, so it serialises retries of one release but lets two
+different releases run side by side. Once `bundleVersion` is pinned (see
+[Bundle version](#bundle-version)), both carry the same build number, which
+App Store Connect accepts once and rejects the second time — after a full
+universal build. A job that `uses:` a reusable workflow accepts
+`concurrency` (it is on GitHub's list of keywords supported for such jobs);
+`cancel-in-progress: false` queues the second upload rather than killing the
+first. GitHub keeps only one pending run per group, so a third release queued
+behind them replaces the pending second one (that run is cancelled, not
+failed — re-dispatch it).
 
 The `.pkg` is uploaded as a workflow artifact regardless of whether the upload
 succeeded, so a failed upload never means rebuilding a universal binary.
