@@ -50,3 +50,19 @@ jobs:
 
       - name: node --test
         run: node --test 'scripts/*.test.mjs'
+
+      # actionlint only sees `run:` blocks; the scripts the workflows call are checked here.
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      # The Windows smoke test cannot run on Linux; at least prove it parses.
+      - name: Parse the PowerShell scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem scripts -Filter *.ps1) {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+            if ($errors) { $errors | ForEach-Object { Write-Output "::error file=$($file.Name)::$_" }; $failed = $true }
+          }
+          if ($failed) { exit 1 }

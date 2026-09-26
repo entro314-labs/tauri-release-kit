@@ -247,6 +247,24 @@ pinned (`job.workflow_repository` @ `job.workflow_sha`) with the caller's
 `GITHUB_TOKEN`, which cannot read another private repository — so a private
 fork's verify step fails at that checkout. Keep the kit repo public.
 
+## Package smoke tests (opt-in)
+
+`smoke_test: true` installs and launches what each leg built, on every leg
+whose runner can execute it:
+
+| OS | Check |
+| --- | --- |
+| Linux | `dpkg-deb -f <deb> Version` equals the release version; the AppImage is extracted and started under Xvfb and must still be running after 15 s, with no panic or dynamic-linker error in its output |
+| Windows | each MSI's `ProductVersion` (read, not installed) equals the version; the NSIS installer runs silently into a scratch directory and the installed app must still be running after 10 s (install dir, app output and Application event-log errors are printed on failure) |
+| macOS | `hdiutil verify` on the dmg; the `.app`'s main executable must still be running after 10 s |
+
+A leg whose runner has a different CPU architecture than its target — the
+`darwin-x86_64` leg pointed at an Apple Silicon `macos_intel_runner` — is
+skipped with a notice. It is off by default because an app that exits
+without a display, needs first-run setup, or single-instances itself fails
+it for reasons that are not bugs; turn it on once your app starts cleanly on
+a bare runner. The logic lives in [`scripts/smoke-*`](scripts/).
+
 ## Checksums, SBOM and build provenance
 
 After the last leg uploads and before verification, the `checksums` job

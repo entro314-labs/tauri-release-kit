@@ -52,6 +52,10 @@ jobs:
       #     THIS repo behind its protection rules. See the kit README's
       #     "Scoping secrets to an environment" before adding reviewers.
       # environment: 'release'
+      # --- Package smoke tests (optional, default false): install + launch
+      #     what each leg built (deb version, AppImage under Xvfb, MSI
+      #     ProductVersion, NSIS install + launch, dmg verify + .app launch).
+      # smoke_test: true
       # --- Post-release patch-bump PR (default true). Set false when a local
       #     release driver (e.g. release-kit) writes the version BEFORE the
       #     tag — two writers otherwise race on the same version files.

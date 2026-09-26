@@ -261,6 +261,16 @@ on:
         required: false
         type: boolean
         default: true
+      smoke_test:
+        description: >-
+          Install and launch the built packages on every leg whose runner can
+          execute them (opt-in): deb version, AppImage started under Xvfb,
+          MSI ProductVersion, NSIS silent install + launch, dmg verify + .app
+          launch. Cross-arch legs (an x86_64 leg on an arm64 runner) are
+          skipped with a notice. Adds a few minutes per leg; see the README.
+        required: false
+        type: boolean
+        default: false
       environment:
         description: >-
           Optional GitHub environment (in the CALLING repo) for every job that
@@ -1292,6 +1302,62 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+      # The kit's own scripts, at the commit the caller pinned. Checked out
+      # AFTER tauri-action so its config/workspace discovery never sees them.
+      - name: Check out the kit's scripts
+        if: inputs.smoke_test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-kit
+          persist-credentials: false
+
+      - name: Confirm the kit checkout
+        if: inputs.smoke_test
+        shell: bash
+        run: |
+          test -f .release-kit/scripts/verify-release.mjs \
+            || { echo "::error::The kit checkout did not resolve (job.workflow_repository/job.workflow_sha) — no scripts/verify-release.mjs"; exit 1; }
+
+      # Opt-in (smoke_test): signatures say an artifact is ours, not that it
+      # installs or starts. Launching needs the runner to execute the target's
+      # code, so a cross-arch leg (the darwin-x86_64 leg on an Apple Silicon
+      # runner) is skipped with a notice rather than trusted to emulation.
+      # Details in each scripts/smoke-*.
+      - name: Smoke-test packages
+        if: inputs.smoke_test
+        shell: bash
+        env:
+          OS_NAME: ${{ matrix.os_name }}
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          BUNDLES: ${{ matrix.bundles }}
+          VERSION: ${{ needs.check-changelog.outputs.version }}
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+        run: |
+          set -euo pipefail
+          case "${RUNNER_ARCH}/${ARCH}" in
+            X64/x86_64|ARM64/aarch64) ;;
+            *)
+              echo "::notice::Skipping the package smoke test on ${TARGET}: this ${RUNNER_ARCH} runner cannot natively run ${ARCH} code."
+              exit 0
+              ;;
+          esac
+          BARE="${VERSION#v}"
+          case "$OS_NAME" in
+            linux)
+              sudo apt-get install -y xvfb xauth
+              bash .release-kit/scripts/smoke-linux.sh "$BUNDLE_DIR" "$BARE" "$BUNDLES"
+              ;;
+            darwin)
+              bash .release-kit/scripts/smoke-macos.sh "$BUNDLE_DIR" "$BUNDLES"
+              ;;
+            windows)
+              pwsh -NoProfile -File .release-kit/scripts/smoke-windows.ps1 -BundleDir "$BUNDLE_DIR" -Version "$BARE" -Bundles "$BUNDLES"
+              ;;
+          esac
 
       # AppImage and RPM signature verification. APPIMAGETOOL_FORCE_SIGN
       # already fails the bundle on a signing error, so this catches the
