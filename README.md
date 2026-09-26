@@ -100,11 +100,27 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
 
 3. **Generate the updater keypair** (passwordless is fine — and simplest):
    ```bash
-   pnpm tauri signer generate -w updater.key --password "" --ci
+   npx --yes @tauri-apps/cli@2.11.5 signer generate -w updater.key --password "" --ci
    ```
+   - Generate with a pinned, known-good CLI as above, not whatever version
+     the app has: `signer generate` in @tauri-apps/cli **2.9.4 – 2.10.0**
+     writes a passwordless key that NO tauri version can decrypt with an empty
+     password ("incorrect updater private key password: Wrong password for
+     that key", [tauri#14829](https://github.com/tauri-apps/tauri/issues/14829),
+     fixed in 2.10.1). A key made that way cannot be repaired — generate a new
+     one (and ship the new pubkey before the old key is retired). Keys from
+     2.10.1+ or ≤ 2.9.3 work with every 2.x CLI; checked with 2.5.0-, 2.9.6-
+     and 2.11.5-generated keys signed by 2.9.6 and 2.11.5.
    - Public key → `plugins.updater.pubkey` in `tauri.conf.json`
    - Private key → repo secret: `gh secret set TAURI_SIGNING_PRIVATE_KEY < updater.key`
-   - Do NOT set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` for a passwordless key
+   - Do NOT set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` for a passwordless key.
+     (Unset and empty behave the same in the build: under `CI` the tauri CLI
+     treats a missing password as empty.)
+   - Or give the key a password (`--password '<pw>'`) and set
+     `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to it — that works on every CLI
+     version, including 2.9.4 – 2.10.0.
+   - Dispatch the credential preflight (`templates/credentials.yml`) once the
+     secret is set: it signs with the key and checks it against the pubkey.
    - **Back the key up outside the repo** (password manager). Losing it after
      a release permanently breaks auto-update for installed users.
 
@@ -279,7 +295,7 @@ not the code, in a few minutes:
 
 | Credential | Check |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` (+ password) | signs a scratch file with the tauri CLI exactly as the build decrypts it, and the signature's key id must equal `plugins.updater.pubkey`'s |
+| `TAURI_SIGNING_PRIVATE_KEY` (+ password) | signs a scratch file with the tauri CLI exactly as the build decrypts it (names the 2.9.4–2.10.0 passwordless-key bug when that is the cause), and the signature's key id must equal `plugins.updater.pubkey`'s |
 | `APPLE_CERTIFICATE` / `_PASSWORD` / `APPLE_SIGNING_IDENTITY` | imported into a throwaway keychain; the identity must be listed by `security find-identity -v -p codesigning` |
 | notarization (API key or Apple ID) | one authenticated `xcrun notarytool history` call |
 | `WINDOWS_CERTIFICATE` / `_PASSWORD` (/ `_THUMBPRINT`) | `Import-PfxCertificate` must land a certificate with its private key, matching the pinned thumbprint, not expired (warning inside 30 days) |

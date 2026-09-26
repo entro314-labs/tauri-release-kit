@@ -345,3 +345,16 @@ the first person to hit one recognises it. Each says how firm it is.
   downloads, so every updater install fails its signature check — a broken
   update channel that no step of the release reports. (From chiri's SignPath
   pipeline.)
+
+- **A passwordless updater key from tauri CLI 2.9.4 – 2.10.0 is unusable.**
+  Those releases (minisign 0.8.0) write a key generated with `--password ""`
+  in a form that no tauri version decrypts with an empty password: signing
+  fails with "incorrect updater private key password: Wrong password for that
+  key", in `tauri signer sign` and in the build's updater signing alike (same
+  `secret_key()` call). Upstream: tauri#14829, fixed in 2.10.1 (tauri#15022
+  says such keys must be regenerated). Reproduced here: 2.9.6-generated
+  passwordless keys fail under 2.9.6 and 2.11.5; 2.5.0- and 2.11.5-generated
+  ones sign under both. Not caused by how the kit passes the password —
+  under `CI` an unset `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and an empty one
+  are the same `Some("")` to the CLI. README step 3 pins the generating CLI;
+  `credentials.yml` names this cause when it sees the error.
