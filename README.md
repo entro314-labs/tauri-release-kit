@@ -55,9 +55,10 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
 1. **Copy the callers** from `templates/`:
    - `templates/release.yml` → `.github/workflows/release.yml` (fill in
      `app_display_name`, `project_path`, `cargo_package`; for private app
-     repos also `releases_repo` + the `RELEASES_TOKEN` secret; for Homebrew,
+     repos also `releases_repo` + a GitHub App (`app_client_id` +
+     `APP_PRIVATE_KEY`) or the `RELEASES_TOKEN` secret; for Homebrew,
      `product_name`, `homebrew_tap`, `cask_desc`, `cask_homepage`,
-     `bundle_identifier` + the `HOMEBREW_TAP_TOKEN` secret)
+     `bundle_identifier` — see "Cross-repo credentials")
    - `templates/tests.yml` → `.github/workflows/tests.yml` (calls the Rust
      gates and the commit gate; set `lint_branch_commits: true` if you merge
      without squashing). The Rust gates include a blocking `cargo audit` of
@@ -230,27 +231,64 @@ not the code, in a few minutes:
 | `WINDOWS_CERTIFICATE` / `_PASSWORD` (/ `_THUMBPRINT`) | `Import-PfxCertificate` must land a certificate with its private key, matching the pinned thumbprint, not expired (warning inside 30 days) |
 | `AZURE_*` + `windows_azure_*` | a client-credentials token request for the service principal (the signing role itself is not checked) |
 | `LINUX_GPG_PRIVATE_KEY` (+ passphrase, key id) | imported into a scratch keyring and used to sign |
-| `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN` | `gh api repos/<repo> --jq .permissions.push` must be `true` |
+| GitHub App (`app_client_id` + `APP_PRIVATE_KEY`) | a token is minted for the releases repo and the tap, as release.yml does — that fails unless the App is installed there with Contents: write |
+| `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN` (when no App) | `gh api repos/<repo> --jq .permissions.push` must be `true` |
 
 An optional credential that is not configured is a notice; one that is set but
 broken, or half-configured, fails — every check runs, so one run lists all
 problems. The macOS and Windows jobs start only when their secrets exist.
 Pass the same `project_path`, `releases_repo`, `homebrew_tap`,
-`windows_azure_*` and `environment` values as your release caller.
+`windows_azure_*`, `app_client_id` and `environment` values as your release
+caller.
 
-## Cross-repo tokens
+## Cross-repo credentials
 
-Needed only for the optional cross-repo features (per app, or org-level
-shared to selected repos):
+Needed only for the optional cross-repo features: writing releases to
+`releases_repo`, and pushing the cask to `homebrew_tap`. Two ways to provide
+them; the GitHub App is the recommended default.
 
-- `RELEASES_TOKEN` — fine-grained PAT, **Contents: Read and write** on the
-  releases repo only. Required whenever `releases_repo` is set.
-- `HOMEBREW_TAP_TOKEN` — fine-grained PAT, **Contents: Read and write** on the
-  tap repo only. The cask job skips with a warning when absent.
+### GitHub App (recommended)
 
-Use scoped fine-grained PATs, not a broad classic token — and note that
-fine-grained PATs EXPIRE (a vanished `RELEASES_TOKEN` has cost a real release
-attempt at the publish step, after all legs had built); calendar the renewal.
+1. Create a GitHub App (org or user settings → Developer settings → GitHub
+   Apps) with **Repository permissions → Contents: Read and write** and
+   nothing else; no webhook.
+2. Install it on the releases repo and the tap repo (only those).
+3. In the app repo: `app_client_id: '<the App's Client ID>'` in the caller
+   (it is not secret), and the App's private key (`.pem` contents) as the
+   `APP_PRIVATE_KEY` secret. Pass `app_client_id` to `flatpak.yml` /
+   `aur.yml` / `credentials.yml` too.
+
+Every job that writes cross-repo then mints its own installation token with
+`actions/create-github-app-token`, scoped to exactly the one repo it writes
+(`owner` + `repositories`) with `contents: write` — tokens cannot be handed
+between jobs, so each job mints. With `app_client_id` set the App is used for
+every cross-repo target, so it must be installed on all of them;
+`check-changelog` mints once up front, so a missing installation fails in
+seconds. Cask commits are authored as the App's bot account.
+
+Why it is the default: an App's key does not expire on a calendar, while a
+fine-grained PAT does (a vanished `RELEASES_TOKEN` has cost a real release at
+the publish step, after all legs had built), and its tokens are narrower —
+one repo, one permission, one hour. Two things to know:
+
+- **One-hour tokens.** tauri-action uploads each leg's assets when that leg's
+  build finishes, with a token minted right before the build. A leg whose
+  build takes longer than about 50 minutes (typically a slow self-hosted
+  cross-build) would upload with an expired token; such an app should stay on
+  `RELEASES_TOKEN`.
+- **Releases written by the App trigger workflows** (`on: release`) in the
+  releases repo, unlike `GITHUB_TOKEN`; same-repo mode still uses
+  `GITHUB_TOKEN` (see docs/GOTCHAS.md).
+
+### Fine-grained PATs (fallback)
+
+- `RELEASES_TOKEN` — **Contents: Read and write** on the releases repo only.
+  Required whenever `releases_repo` is set and `app_client_id` is not.
+- `HOMEBREW_TAP_TOKEN` — **Contents: Read and write** on the tap repo only. The
+  cask job skips with a warning when neither it nor the App is configured.
+
+Use scoped fine-grained PATs, not a broad classic token, and calendar their
+expiry — `credentials.yml` checks they can still push.
 
 ### Scoping secrets to an environment
 
@@ -260,7 +298,7 @@ reads a signing or publishing secret (`check-changelog`, `create-release`,
 `verify-release`, `publish-release`, `publish-homebrew-cask`) runs in that
 GitHub environment,
 so `TAURI_SIGNING_PRIVATE_KEY`, the Apple/Windows/Linux signing secrets,
-`RELEASES_TOKEN` and `HOMEBREW_TAP_TOKEN` can be moved out of repo-level
+`APP_PRIVATE_KEY`, `RELEASES_TOKEN` and `HOMEBREW_TAP_TOKEN` can be moved out of repo-level
 secrets and behind the environment's protection rules. Things to know:
 
 - The environment is resolved in the **calling** (app) repo, like everything

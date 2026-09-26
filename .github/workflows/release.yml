@@ -283,6 +283,17 @@ on:
         required: false
         type: boolean
         default: false
+      app_client_id:
+        description: >-
+          Client ID of a GitHub App used INSTEAD of the RELEASES_TOKEN /
+          HOMEBREW_TAP_TOKEN PATs for every cross-repo write (releases_repo,
+          homebrew_tap). Needs the APP_PRIVATE_KEY secret, and the App
+          installed on each of those repos with Contents: Read and write. Each
+          job mints its own token scoped to exactly the repo it writes. Empty
+          = the PATs, as before. See the README, "GitHub App instead of PATs".
+        required: false
+        type: string
+        default: ''
       environment:
         description: >-
           Optional GitHub environment (in the CALLING repo) for every job that
@@ -308,6 +319,9 @@ on:
         required: false
       HOMEBREW_TAP_TOKEN:
         description: 'Fine-grained PAT with Contents:RW on homebrew_tap. Cask publishing skips with a warning when absent.'
+        required: false
+      APP_PRIVATE_KEY:
+        description: 'Private key (.pem contents) of the GitHub App named by app_client_id. Replaces RELEASES_TOKEN and HOMEBREW_TAP_TOKEN when set.'
         required: false
       APPLE_CERTIFICATE:
         required: false
@@ -432,16 +446,38 @@ jobs:
 
       # Cross-repo mode is all-or-nothing: catching a missing token here costs
       # seconds; catching it at publish costs a full 6-platform build.
-      - name: Preflight - RELEASES_TOKEN present when cross-repo
+      - name: Preflight - cross-repo credential present
         if: inputs.releases_repo != ''
         env:
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          APP_CLIENT_ID: ${{ inputs.app_client_id }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
+          if [ -n "${APP_CLIENT_ID}" ]; then
+            if [ -z "${APP_PRIVATE_KEY:-}" ]; then
+              echo "::error::app_client_id is set but the APP_PRIVATE_KEY secret is missing — add the GitHub App's private key"
+              exit 1
+            fi
+            echo "GitHub App ${APP_CLIENT_ID} configured for ${RELEASES_REPO}."
+            exit 0
+          fi
           if [ -z "${RELEASES_TOKEN:-}" ]; then
-            echo "::error::releases_repo is set but the RELEASES_TOKEN secret is missing — create a fine-grained PAT with Contents:RW on ${RELEASES_REPO}"
+            echo "::error::releases_repo is set but neither the RELEASES_TOKEN secret nor app_client_id is — create a fine-grained PAT with Contents:RW on ${RELEASES_REPO}, or configure a GitHub App (README)"
             exit 1
           fi
           echo "RELEASES_TOKEN present."
+
+      # With a GitHub App, minting here proves it is installed on the releases
+      # repo with Contents: write — before any leg runs.
+      - name: Preflight - GitHub App can write the releases repo
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.relrepo.outputs.OWNER }}
+          repositories: ${{ steps.relrepo.outputs.NAME }}
+          permission-contents: write
 
       - name: Verify CHANGELOG entry exists
         env:
@@ -716,6 +752,20 @@ jobs:
           fi
           echo "file=$BODY_FILE" >> "$GITHUB_OUTPUT"
 
+      # GitHub App token for releases_repo when app_client_id is set. Minted
+      # in every job that writes there, scoped to that one repo: a token in a
+      # job output is masked and dropped, so jobs cannot share one.
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       # The draft is created on the releases repo (which may be a public
       # mirror — see the header note on private repos). On publish, GitHub
       # creates the tag on that repo's default branch.
@@ -738,7 +788,7 @@ jobs:
           NOTES_FILE: ${{ steps.notes.outputs.file }}
         with:
           # Default GITHUB_TOKEN cannot write to another repo.
-          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const { readFileSync } = require('node:fs');
             const { VERSION, CHANNEL, APP_NAME, REL_OWNER, REL_NAME, NOTES_FILE } = process.env;
@@ -1197,12 +1247,27 @@ jobs:
             echo "SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN}" >> "$GITHUB_ENV"
           fi
 
+      # releases_repo token via the GitHub App (see create-release). Minted right
+      # before the build: installation tokens live one hour, and tauri-action
+      # uploads when the build finishes (README: a leg that builds for longer
+      # than ~50 minutes needs RELEASES_TOKEN instead).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Build and upload via tauri-action
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           # Writes assets to the releases repo; the default GITHUB_TOKEN cannot
           # write cross-repo, so RELEASES_TOKEN wins when configured.
-          GITHUB_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # Empty-set is CORRECT for passwordless keys (var_os → Some("")).
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -1449,6 +1514,18 @@ jobs:
       contents: write
     if: always() && needs.build-and-release.result == 'success'
     steps:
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Generate updater JSON
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -1459,7 +1536,7 @@ jobs:
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
           TARGETS: ${{ needs.plan.outputs.targets }}
         with:
-          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const version = process.env.VERSION;
             const channel = process.env.CHANNEL;
@@ -1647,9 +1724,21 @@ jobs:
           printf '%s:6:\n' "$KEY_ID" | gpg --batch --import-ownertrust
           echo "key_id=${KEY_ID}" >> "$GITHUB_OUTPUT"
 
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Generate, sign and upload SHA256SUMS
         env:
-          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ needs.check-changelog.outputs.version }}
@@ -1707,9 +1796,21 @@ jobs:
       id-token: write        # Sigstore signing certificate
       attestations: write    # store the attestation on this repository
     steps:
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Download SHA256SUMS
         env:
-          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
@@ -1789,6 +1890,18 @@ jobs:
       # smoke-tested post-publish in publish-release. A failing result is
       # re-read up to 8 times, 5 s apart (GitHub computes digests
       # asynchronously), and the step summary is written either way.
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Verify release assets + update manifest (via API)
         id: verify
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -1805,7 +1918,7 @@ jobs:
           SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
           SUMS_KEY_ID: ${{ needs.checksums.outputs.key_id }}
         with:
-          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const { pathToFileURL } = require('node:url');
             const { run } = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.release-kit/scripts/verify-release.mjs`).href);
@@ -1837,6 +1950,18 @@ jobs:
     # attest step); it still has to have run, so provenance precedes publish.
     if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success' && needs.attest.result == 'success'
     steps:
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
       - name: Publish release
         id: publish
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -1847,7 +1972,7 @@ jobs:
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           VERSION: ${{ needs.check-changelog.outputs.version }}
         with:
-          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const owner = process.env.REL_OWNER;
             const repo = process.env.REL_NAME;
@@ -1950,7 +2075,7 @@ jobs:
           REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
           REL_NAME: ${{ needs.check-changelog.outputs.releases_name }}
         with:
-          github-token: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
             const channel = process.env.CHANNEL;
@@ -2058,21 +2183,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: ${{ inputs.environment }}
-    # Pushes with HOMEBREW_TAP_TOKEN and hashes public assets; no GITHUB_TOKEN use.
+    # Pushes with HOMEBREW_TAP_TOKEN (or the GitHub App) and hashes public
+    # assets; no GITHUB_TOKEN use.
     permissions: {}
     if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
     steps:
+      - name: Resolve tap
+        id: tap
+        env:
+          TAP_REPO: ${{ inputs.homebrew_tap }}
+        run: |
+          { echo "owner=${TAP_REPO%%/*}"; echo "name=${TAP_REPO##*/}"; } >> "$GITHUB_OUTPUT"
+
+      # With app_client_id the App replaces HOMEBREW_TAP_TOKEN; it must be
+      # installed on the tap (a mint failure here is a misconfiguration).
+      - name: Mint tap token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.tap.outputs.owner }}
+          repositories: ${{ steps.tap.outputs.name }}
+          permission-contents: write
+
       - name: Check cask prerequisites
         id: prereq
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app_token.outputs.token || secrets.HOMEBREW_TAP_TOKEN }}
           PRODUCT_NAME: ${{ inputs.product_name }}
           TARGETS: ${{ needs.plan.outputs.targets }}
           MACOS_BUNDLES: ${{ needs.plan.outputs.macos_bundles }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::HOMEBREW_TAP_TOKEN secret missing — skipping Homebrew cask publish"
+            echo "::warning::Neither HOMEBREW_TAP_TOKEN nor app_client_id set — skipping Homebrew cask publish"
             exit 0
           fi
           if [ -z "${PRODUCT_NAME:-}" ]; then
@@ -2102,7 +2248,8 @@ jobs:
       - name: Generate and push cask
         if: steps.prereq.outputs.ready == 'true'
         env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ steps.app_token.outputs.token || secrets.HOMEBREW_TAP_TOKEN }}
+          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
           VERSION: ${{ needs.create-release.outputs.version }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
           APP_NAME: ${{ inputs.app_display_name }}
@@ -2231,8 +2378,15 @@ jobs:
           EOF
 
           cd tap
-          git config user.name "release-kit-bot"
-          git config user.email "releases@users.noreply.github.com"
+          if [ -n "${APP_SLUG:-}" ]; then
+            # Commit as the App's bot account, so the tap's history links to it.
+            BOT_ID="$(GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name "release-kit-bot"
+            git config user.email "releases@users.noreply.github.com"
+          fi
           git add "Casks/${CASK_TOKEN}.rb"
           if git diff --cached --quiet; then
             echo "Cask unchanged — nothing to push."

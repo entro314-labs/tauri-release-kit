@@ -96,12 +96,16 @@ jobs:
       # windows_sign_command: 'my-signer --file %1'
       # --- Cross-repo publishing (REQUIRED for private app repos: private
       #     release assets 404 anonymously, breaking downloads + auto-update).
-      #     Needs the RELEASES_TOKEN secret (fine-grained PAT, Contents:RW on
-      #     the releases repo). Omit both for public single-repo apps.
+      #     Credential: a GitHub App (recommended — app_client_id below + the
+      #     APP_PRIVATE_KEY secret, App installed on the releases repo and the
+      #     tap) or the RELEASES_TOKEN / HOMEBREW_TAP_TOKEN PATs. Omit for
+      #     public single-repo apps. Kit README: "Cross-repo credentials".
       releases_repo: 'my-org/myapp-releases'
+      # app_client_id: 'Iv23li...'     # ← GitHub App Client ID (not secret)
       # --- Homebrew cask publishing (optional; omit homebrew_tap to skip).
       #     Stable → "myapp" cask; alpha/beta → "myapp@alpha" / "myapp@beta".
-      #     Needs the HOMEBREW_TAP_TOKEN secret (Contents:RW on the tap).
+      #     Needs the GitHub App above or the HOMEBREW_TAP_TOKEN secret
+      #     (Contents:RW on the tap).
       product_name: 'myapp'            # ← tauri.conf.json productName (asset filename stem)
       homebrew_tap: 'my-org/homebrew-tap'
       cask_desc: 'One-line app description'
@@ -120,6 +124,7 @@ jobs:
     with:
       tag: ${{ inputs.tag || '' }}
       releases_repo: 'my-org/myapp-releases'
+      # app_client_id: 'Iv23li...'     # ← same GitHub App as the release job
       app_id: 'com.example.myapp'      # ← MUST equal tauri.conf.json identifier
       product_name: 'myapp'
       arches: 'x86_64'                 # ← add aarch64 once you ship an arm64 .deb
@@ -138,6 +143,7 @@ jobs:
     with:
       tag: ${{ inputs.tag || '' }}
       releases_repo: 'my-org/myapp-releases'
+      # app_client_id: 'Iv23li...'     # ← same GitHub App as the release job
       pkgname: 'myapp-bin'             # ← the `-bin` suffix is required by Arch
       pkgdesc: 'One-line app description'
       url: 'https://example.com'

@@ -99,9 +99,19 @@ on:
         required: false
         type: boolean
         default: true
+      app_client_id:
+        description: >-
+          Client ID of the GitHub App release.yml uses instead of RELEASES_TOKEN
+          (with the APP_PRIVATE_KEY secret). Empty = RELEASES_TOKEN.
+        required: false
+        type: string
+        default: ''
     secrets:
       RELEASES_TOKEN:
         description: 'Fine-grained PAT with Contents:RW on releases_repo. Required when releases_repo is set.'
+        required: false
+      APP_PRIVATE_KEY:
+        description: 'Private key of the GitHub App named by app_client_id'
         required: false
 
 # Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
@@ -159,7 +169,22 @@ jobs:
             echo "tag=$TAG"
             echo "version=${TAG#v}"
             echo "repo=${RELEASES_REPO:-$GITHUB_REPOSITORY}"
+            echo "owner=${RELEASES_REPO%%/*}"
+            echo "name=${RELEASES_REPO##*/}"
           } >> "$GITHUB_OUTPUT"
+
+      # With app_client_id, a token from the GitHub App replaces RELEASES_TOKEN,
+      # scoped to the releases repo (as in release.yml).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: steps.select.outputs.selected == 'true' && inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.rel.outputs.owner }}
+          repositories: ${{ steps.rel.outputs.name }}
+          permission-contents: write
 
       # The .deb is the only input this workflow needs. A missing one is a
       # skip, not a failure: an app may deliberately ship AppImage-only on one
@@ -168,7 +193,7 @@ jobs:
         id: deb
         if: steps.select.outputs.selected == 'true'
         env:
-          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
           REPO: ${{ steps.rel.outputs.repo }}
           TAG: ${{ steps.rel.outputs.tag }}
           ARCH: ${{ matrix.arch }}
@@ -434,7 +459,7 @@ jobs:
       - name: Attach the bundle to the release
         if: steps.deb.outputs.found == 'true' && inputs.attach_to_release
         env:
-          GH_TOKEN: ${{ inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || github.token }}
           REPO: ${{ steps.rel.outputs.repo }}
           TAG: ${{ steps.rel.outputs.tag }}
           BUNDLE: ${{ steps.build.outputs.bundle }}

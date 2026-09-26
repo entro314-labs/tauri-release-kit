@@ -297,7 +297,8 @@ the first person to hit one recognises it. Each says how firm it is.
   secrets.GITHUB_TOKEN`, i.e. `GITHUB_TOKEN`. An app's own
   `on: release: published` workflow (release notes fan-out, store
   submissions, announcements) therefore fires only for releases on a mirror
-  repo published with `RELEASES_TOKEN` (a PAT), never for same-repo ones.
+  repo published with `RELEASES_TOKEN` (a PAT) or the GitHub App
+  (`app_client_id`), never for same-repo ones.
   Chain such work with `needs:` in the caller (as `templates/release.yml`
   does for Flatpak/AUR/App Store) or dispatch it explicitly. FlowForge folded
   its tag-triggered release into release-please for exactly this reason, and
