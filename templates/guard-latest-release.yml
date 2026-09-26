@@ -1,0 +1,90 @@
+# Keeps GitHub's "latest release" pointing at the app's highest stable version.
+#
+# Every stable client polls releases/latest/download/latest.json. GitHub hands
+# the `latest` slot to whichever release was published or edited most recently
+# unless told otherwise, so ANY other release on this repo — a CLI or helper
+# with its own tags, a docs bundle, a re-published old version, a manual
+# "Set as latest release" click — silently takes over the stable update
+# channel: installed apps read the wrong manifest or get a 404, and nothing in
+# the release pipeline can see it (verify-release runs before publish).
+# alpha/beta are immune: they poll the fixed latest-<channel> releases.
+#
+# INSTALL IT ON THE REPO THAT SERVES THE UPDATER ENDPOINT: the releases mirror
+# when release.yml's `releases_repo` is set (the app repo is private then and
+# serves nothing), otherwise the app repo itself. Copy to
+# .github/workflows/guard-latest-release.yml there.
+#
+# Triggers:
+#   - release published/edited: react as soon as something takes the slot.
+#   - schedule (daily): the backstop. GitHub starts no workflow for events
+#     caused by GITHUB_TOKEN, so a release published in same-repo mode (where
+#     release.yml writes with GITHUB_TOKEN — docs/GOTCHAS.md, "Releases made
+#     with GITHUB_TOKEN never trigger other workflows") never fires the release
+#     trigger; the schedule catches those within a day.
+#   - workflow_dispatch: run it by hand.
+# This workflow's own make_latest edit uses GITHUB_TOKEN, so it cannot
+# re-trigger itself.
+name: Guard latest release
+
+on:
+  release:
+    types: [published, edited]
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: guard-latest-release
+  cancel-in-progress: false
+
+env:
+  # Tag prefix of the app's stable releases: vX.Y.Z by default. Set it to
+  # whatever distinguishes the app's tags when this repo releases other
+  # things too (e.g. 'desktop-v').
+  TAG_PREFIX: v
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # updateRelease(make_latest)
+    steps:
+      - name: Point latest at the highest stable app release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prefix = process.env.TAG_PREFIX;
+            // Stable app releases only: <prefix>X.Y.Z, not a draft, not a
+            // prerelease (which also excludes the rolling latest-<channel>).
+            const version = (tag) => {
+              if (!tag.startsWith(prefix)) return null;
+              const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(tag.slice(prefix.length));
+              return m ? m.slice(1).map(Number) : null;
+            };
+            const newer = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            let best = null;
+            for (const r of releases) {
+              const v = !r.draft && !r.prerelease && version(r.tag_name);
+              if (v && (!best || newer(v, best.v) > 0)) best = { v, release: r };
+            }
+            if (!best) {
+              core.info(`No published stable release tagged ${prefix}X.Y.Z on ${owner}/${repo}; nothing to guard.`);
+              return;
+            }
+            let current = null;
+            try {
+              current = (await github.rest.repos.getLatestRelease({ owner, repo })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            if (current && current.id === best.release.id) {
+              core.info(`latest is ${current.tag_name}, the highest stable release — nothing to do.`);
+              return;
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: best.release.id, make_latest: 'true' });
+            core.warning(`latest was ${current ? current.tag_name : '(none)'}; re-pointed it at ${best.release.tag_name}, the release stable clients must update to.`);

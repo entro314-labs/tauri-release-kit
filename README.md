@@ -66,6 +66,10 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      comma-separated list of advisory IDs you have accepted
      (`'RUSTSEC-2024-0370,RUSTSEC-2025-0012'` — write down why next to it).
      An unrecognised ID fails the job rather than ignoring nothing.
+   - `templates/guard-latest-release.yml` → `.github/workflows/` of the repo
+     that SERVES the stable updater endpoint — the releases mirror when
+     `releases_repo` is set, else the app repo (see "Guarding the stable
+     update channel")
    - `templates/credentials.yml` → `.github/workflows/credentials.yml`
      (dispatch it before a release to prove the secrets still work — see
      "Credential preflight")
@@ -195,6 +199,22 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    - Retrying a leg that failed AFTER uploading its assets is safe:
      tauri-action deletes same-named assets before re-uploading, and the
      updater manifest is rebuilt and replaced on every attempt.
+
+## Guarding the stable update channel
+
+Stable clients poll `releases/latest/download/latest.json`, and GitHub gives
+the `latest` slot to whatever was published or edited last unless told
+otherwise. Any other release on the serving repo — a CLI with its own tags, a
+re-published old version, a manual "Set as latest" click — silently takes
+over the stable channel, after `verify-release` has run.
+`templates/guard-latest-release.yml` re-points `latest` at the highest
+`vX.Y.Z` release that is neither draft nor prerelease (`TAG_PREFIX` in the
+file when the app's tags use another prefix). Install it on the repo that
+serves the endpoint: the releases mirror when `releases_repo` is set,
+otherwise the app repo. It runs on `release: published/edited`, on dispatch,
+and daily — the daily run is what catches same-repo releases, because
+releases published with `GITHUB_TOKEN` trigger no workflows. alpha/beta need
+no guard: they poll the fixed `latest-<channel>` releases.
 
 ## Credential preflight
 

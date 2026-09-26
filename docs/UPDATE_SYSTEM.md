@@ -124,6 +124,11 @@ the update card states below.
   exactly the shipped platforms, every URL is on the serving repo's tag path,
   and every signature equals its uploaded `.sig` and was made by the app's
   `plugins.updater.pubkey` (see the README, "What verify-release proves").
+- The stable endpoint follows GitHub's `latest` release, which any other
+  release on the serving repo can take. `templates/guard-latest-release.yml`,
+  installed on that repo, keeps it on the highest stable app version
+  (on publish/edit, and daily for releases made with `GITHUB_TOKEN`, which
+  fire no workflow events).
 - Anti-patterns the pipeline structurally prevents: placeholder pubkeys
   (scaffold CI guard), GitHub-API-endpoint polling (rate limits), unsigned
   hand-rolled downloaders, mandatory startup update modals.
