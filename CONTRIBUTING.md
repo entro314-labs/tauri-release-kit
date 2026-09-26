@@ -14,7 +14,14 @@ describing the failure mode, not just the fix.
 
 ## Testing changes
 
-There is no test harness for a reusable workflow other than running it:
+Every push to `main` and every pull request runs `lint.yml`: actionlint (with
+shellcheck over each `run:` block) and zizmor. Run both locally before
+pushing — `actionlint` and `uvx zizmor .` from the repo root — and keep them at
+zero findings; an accepted zizmor finding goes in `.github/zizmor.yml` with
+its reason.
+
+Lint cannot tell you the pipeline works. For that there is no test harness
+for a reusable workflow other than running it:
 
 1. Push your change to a branch of your fork.
 2. Point a consumer app's caller workflow at it:
