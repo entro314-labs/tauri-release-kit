@@ -261,6 +261,16 @@ on:
         required: false
         type: boolean
         default: true
+      environment:
+        description: >-
+          Optional GitHub environment (in the CALLING repo) for every job that
+          reads a signing or publishing secret, so those secrets can live in
+          that environment behind its protection rules instead of at repo
+          level. Empty = no environment, exactly as before. See the README's
+          "Scoping secrets to an environment".
+        required: false
+        type: string
+        default: ''
     secrets:
       TAURI_SIGNING_PRIVATE_KEY:
         description: 'minisign private key for updater artifact signatures (REQUIRED — createUpdaterArtifacts fails without it)'
@@ -347,6 +357,14 @@ jobs:
   check-changelog:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # `environment` on every job that reads a signing/publishing secret (this
+    # one checks RELEASES_TOKEN): a job WITHOUT it would resolve secrets.X to
+    # the repo-level value, so an environment-scoped secret would look unset
+    # there. An empty name means no environment — not documented by GitHub,
+    # but GitHub Desktop's CI relies on it on every pull request (its
+    # `environment: ${{ inputs.environment }}` jobs run with no deployment).
+    # rust-fmt, plan and bump-version read no such secret and stay outside.
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read   # checkout only
     outputs:
@@ -617,6 +635,7 @@ jobs:
     needs: check-changelog
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: ${{ inputs.environment }}
     # Creates (or reuses) the draft when releases_repo is empty.
     permissions:
       contents: write
@@ -738,6 +757,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 180
+    environment: ${{ inputs.environment }}
     # tauri-action uploads assets to the draft in same-repo mode.
     permissions:
       contents: write
@@ -1326,6 +1346,7 @@ jobs:
     needs: [check-changelog, create-release, build-and-release, plan]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: ${{ inputs.environment }}
     # Reads the draft's assets and uploads the manifest to it.
     permissions:
       contents: write
@@ -1436,6 +1457,7 @@ jobs:
     needs: [check-changelog, create-release, build-and-release, create-updater-json]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: ${{ inputs.environment }}
     # Read-only in intent, but in same-repo mode it reads a DRAFT release, and
     # the REST API lists drafts only to tokens with push access.
     permissions:
@@ -1493,6 +1515,7 @@ jobs:
     needs: [check-changelog, create-release, build-and-release, create-updater-json, verify-release]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: ${{ inputs.environment }}
     # Flips the draft public and maintains the rolling latest-<channel> release.
     permissions:
       contents: write
@@ -1684,6 +1707,7 @@ jobs:
     needs: [check-changelog, create-release, publish-release, plan]
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    environment: ${{ inputs.environment }}
     # Pushes with HOMEBREW_TAP_TOKEN and hashes public assets; no GITHUB_TOKEN use.
     permissions: {}
     if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''

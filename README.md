@@ -206,6 +206,34 @@ Use scoped fine-grained PATs, not a broad classic token — and note that
 fine-grained PATs EXPIRE (a vanished `RELEASES_TOKEN` has cost a real release
 attempt at the publish step, after all legs had built); calendar the renewal.
 
+### Scoping secrets to an environment
+
+`release.yml` takes an optional `environment` input. When set, every job that
+reads a signing or publishing secret (`check-changelog`, `create-release`,
+`build-and-release`, `create-updater-json`, `verify-release`,
+`publish-release`, `publish-homebrew-cask`) runs in that GitHub environment,
+so `TAURI_SIGNING_PRIVATE_KEY`, the Apple/Windows/Linux signing secrets,
+`RELEASES_TOKEN` and `HOMEBREW_TAP_TOKEN` can be moved out of repo-level
+secrets and behind the environment's protection rules. Things to know:
+
+- The environment is resolved in the **calling** (app) repo, like everything
+  else in a reusable workflow — create it there, not in this kit.
+- GitHub documents that a job with `environment:` in a reusable workflow gets
+  the environment's secret, not the one the caller passed; that is the
+  mechanism this relies on.
+- Protection rules apply per job: GitHub's docs say they must pass "before a
+  job referencing the environment is sent to a runner". Expect a
+  required-reviewer rule to hold the pipeline at each of those seven jobs
+  rather than once per release (unverified here — no live run). Deployment
+  branch/tag rules must admit the release tags (`v*`) and the branch you
+  dispatch retries from.
+- Each environment-bearing job records a deployment on the app repo.
+- Empty (the default) means no environment, as before. GitHub does not
+  document the empty-name case; GitHub Desktop's CI runs the same
+  `environment: ${{ inputs.environment }}` pattern with an empty input on
+  every pull request, with no deployment created, which is the evidence for
+  it.
+
 If you fork this kit into a **private** repo, callers additionally need
 workflow access: **Settings → Actions → General → Access → "Accessible from
 repositories in the … organization"**.

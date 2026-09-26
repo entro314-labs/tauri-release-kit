@@ -47,6 +47,11 @@ jobs:
       cargo_package: 'myapp'           # ← [[package]] name in Cargo.lock
       tag: ${{ inputs.tag || '' }}
       build_targets: ${{ inputs.build_targets || '' }}
+      # --- GitHub environment (optional) for the jobs that read signing and
+      #     publishing secrets — lets those secrets live in an environment of
+      #     THIS repo behind its protection rules. See the kit README's
+      #     "Scoping secrets to an environment" before adding reviewers.
+      # environment: 'release'
       # --- Post-release patch-bump PR (default true). Set false when a local
       #     release driver (e.g. release-kit) writes the version BEFORE the
       #     tag — two writers otherwise race on the same version files.
