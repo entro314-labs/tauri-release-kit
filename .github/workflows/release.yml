@@ -768,12 +768,14 @@ jobs:
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
-      - name: Cache Rust workspace
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: ${{ inputs.rust_workspace_dir != '' && inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}
-          shared-key: ${{ matrix.target }}
-          cache-on-failure: true
+      # No Rust cache on release legs, deliberately. A tag run can restore only
+      # caches saved on its own tag or on the default branch, so the entry a
+      # previous tag's run saved was never reachable by the next release; the
+      # only restorable entries came from default-branch runs (a
+      # build_targets retry dispatched from main). So nearly every tag build was
+      # already cold, and the cache's one real effect was a poisoning path:
+      # anything able to write a matching key on the default branch would have
+      # its target/ and ~/.cargo contents compiled into a signed release.
 
       # Plain apt-get, NOT awalsh128/cache-apt-pkgs-action: on a real release's
       # arm64 leg that action reported "Clean installing 12
