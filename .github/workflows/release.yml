@@ -353,6 +353,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # A dispatch retry names the tag; without this it would build whatever the
           # default branch is at retry time and attach that beside the tag's assets.
           ref: ${{ inputs.tag || github.ref }}
@@ -451,6 +452,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # A dispatch retry names the tag; without this it would build whatever the
           # default branch is at retry time and attach that beside the tag's assets.
           ref: ${{ inputs.tag || github.ref }}
@@ -621,6 +623,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # A dispatch retry names the tag; without this it would build whatever the
           # default branch is at retry time and attach that beside the tag's assets.
           ref: ${{ inputs.tag || github.ref }}
@@ -721,6 +724,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # A dispatch retry names the tag; without this it would build whatever the
           # default branch is at retry time and attach that beside the tag's assets.
           ref: ${{ inputs.tag || github.ref }}
@@ -802,7 +806,9 @@ jobs:
 
       - name: Rust clippy check
         working-directory: ${{ inputs.project_path }}/src-tauri
-        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo clippy --target "$TARGET" -- -D warnings
 
       # Materialize the App Store Connect API key (.p8) for notarization.
       # Stored base64 so it survives the GitHub secrets UI. No-op when unset.
@@ -1832,6 +1838,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.repository.default_branch }}
 
@@ -1923,6 +1930,10 @@ jobs:
             echo "::warning::Version files already at next patch; nothing to bump."
             exit 0
           fi
+          # The checkout does not persist its token (persist-credentials: false), so
+          # the remote is given one here: this is the job's last step and the only
+          # one that talks to origin.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           # A dispatch retry of the same tag reaches here a second time; pushing the
           # branch again is a non-fast-forward that fails the whole release job and
           # skips every downstream channel of a release that did publish.
