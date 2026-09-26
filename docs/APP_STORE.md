@@ -198,6 +198,14 @@ exist:
 certificates and profiles, registering capabilities as needed. The API key
 must have **Admin** access for this.
 
+> **Unverified.** Another Tauri project (notesage) states that `tauri ios
+> build --export-method app-store-connect` — the command this path runs —
+> cannot work with cloud-managed distribution signing, because Tauri cannot
+> pass the API-key authentication through to `xcodebuild`. Neither that claim
+> nor this path has been proven on a real run. If the first iOS run fails at
+> export, switch to the manual path below. See
+> [GOTCHAS.md](GOTCHAS.md#known-traps-not-yet-hit-by-this-kits-own-releases).
+
 **Manual.** Set `IOS_CERTIFICATE`, `IOS_CERTIFICATE_PASSWORD` and
 `IOS_MOBILE_PROVISION` (all base64) and Tauri imports them itself. Use an
 Apple Distribution or iOS Distribution certificate and an "App Store Connect"

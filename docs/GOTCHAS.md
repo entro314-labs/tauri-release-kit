@@ -279,3 +279,68 @@ re-read this first.
   Compile errors abort clippy before its lint phase, so a leg can fail twice
   in a row with *different* error classes: first rustc errors, then, once
   those are fixed, lint errors the same run never got to report.
+
+## Known traps not (yet) hit by this kit's own releases
+
+Unlike everything above, these did not break a release of the app this kit
+was extracted from. They come from GitHub's documented behaviour, from other
+Tauri projects' pipelines, or from reading tauri's source — recorded here so
+the first person to hit one recognises it. Each says how firm it is.
+
+- **Releases made with `GITHUB_TOKEN` never trigger other workflows.** GitHub
+  suppresses workflow runs for events caused by `GITHUB_TOKEN` (other than
+  `workflow_dispatch`/`repository_dispatch`), so a tag or release it creates
+  fires no `on: push: tags` and no `on: release` workflow. In same-repo mode
+  (`releases_repo` empty) every release write in `release.yml` —
+  create-release, publish-release, the rolling `latest-<channel>` release —
+  uses `inputs.releases_repo != '' && secrets.RELEASES_TOKEN ||
+  secrets.GITHUB_TOKEN`, i.e. `GITHUB_TOKEN`. An app's own
+  `on: release: published` workflow (release notes fan-out, store
+  submissions, announcements) therefore fires only for releases on a mirror
+  repo published with `RELEASES_TOKEN` (a PAT), never for same-repo ones.
+  Chain such work with `needs:` in the caller (as `templates/release.yml`
+  does for Flatpak/AUR/App Store) or dispatch it explicitly. FlowForge folded
+  its tag-triggered release into release-please for exactly this reason, and
+  skriuw dispatches its build with `gh workflow run` after pushing the tag.
+
+- **linuxdeploy's GTK plugin is fetched unpinned (app-level concern).**
+  Released tauri-bundler (v2.9.4 and the 2.11 branch) downloads
+  `linuxdeploy-plugin-gtk.sh` from the `master` branch of
+  tauri-apps/linuxdeploy-plugin-gtk into `~/.cache/tauri/` whenever no copy is
+  there — so the AppRun hook in every AppImage comes from whatever `master`
+  was at build time. Because an existing copy is used as-is, an app can
+  pre-seed a pinned one before the build; brows3's
+  `prepare-linux-appimage-plugin.sh` does this, fetching the plugin at a fixed
+  commit and patching its AppRun hook to `LD_PRELOAD` the host's
+  `libwayland-client`, because the bundled Ubuntu Wayland libraries crashed
+  on newer rolling-release EGL stacks under Wayland. That preload is an app
+  decision, not a kit one. Two caveats: on self-hosted runners
+  `~/.cache/tauri/` persists between builds (a stale copy is used forever);
+  and unreleased tauri `dev` (8e70283, 2026-09-25) embeds the plugin in the
+  bundler and rewrites any cached copy that differs, which ends both the
+  unpinned download and the pre-seeding trick — that change also claims to
+  fix `EGL_BAD_PARAMETER` crashes on newer Mesa and stops forcing
+  `GDK_BACKEND=x11`. Re-check this once the kit's apps move to that CLI.
+
+- **iOS: `--export-method app-store-connect` vs cloud-managed signing —
+  UNVERIFIED either way.** notesage's `ios-testflight.yml` states that
+  `tauri ios build --export-method app-store-connect` cannot work when the
+  distribution certificate is cloud-managed, because Tauri cannot pass the
+  App Store Connect authentication through to `xcodebuild`; it shells out to
+  its own script instead (and itself notes it has never run). That is
+  exactly `app-store.yml`'s "Xcode automatic signing" path — the one
+  docs/APP_STORE.md calls recommended. Neither claim has been exercised: the
+  first real iOS run of this kit settles it. If it fails at export, the
+  manual path (`IOS_CERTIFICATE` + `IOS_MOBILE_PROVISION`) does not depend
+  on cloud signing.
+
+- **A post-build signer must run BEFORE the updater signature.** The kit
+  signs Windows installers inside the same `tauri-action` call that writes
+  the updater `.sig`, so the `.sig` covers the signed bytes. Anyone adding an
+  external Authenticode step after the build (SignPath, a remote HSM
+  service) must split it: build with `createUpdaterArtifacts: false`, sign
+  the installer, then run `tauri signer sign` over the SIGNED file. A `.sig`
+  produced over the unsigned installer verifies against a file no user
+  downloads, so every updater install fails its signature check — a broken
+  update channel that no step of the release reports. (From chiri's SignPath
+  pipeline.)
