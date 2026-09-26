@@ -53,11 +53,21 @@ the update card states below.
 - **Typed, throttled progress events** (~100 ms) with `total_bytes:
   Option<u64>` so the UI can render indeterminate when Content-Length is
   absent.
-- **Distribution-policy gate**: on Linux only AppImage self-updates
-  (`APPIMAGE` env set, `FLATPAK_ID` absent); deb/rpm/Flatpak installs get a
-  "update via your package manager" UI state instead of a checker that can
-  never work. Homebrew casks must set `auto_updates true` (the kit's cask
+- **Distribution-policy gate**: AppImage self-updates (`APPIMAGE` env set,
+  `FLATPAK_ID` absent). A deb/rpm install self-updates only when the manifest
+  carries its installer entry (`linux-<arch>-deb` / `linux-<arch>-rpm`, see
+  below) — tauri-plugin-updater looks that key up first and otherwise falls
+  back to `linux-<arch>`, the AppImage, which dpkg/rpm can't install. Flatpak,
+  and deb/rpm without an entry, get an "update via your package manager" UI
+  state instead of a checker that can never work. Homebrew casks must set `auto_updates true` (the kit's cask
   job does) so brew never fights the in-app updater.
+- **Installer entries for .deb/.rpm**: next to `linux-<arch>` (the
+  AppImage), the manifest carries `linux-<arch>-deb` and `linux-<arch>-rpm`
+  pointing at the released packages, for every package whose updater
+  signature (`.deb.sig` / `.rpm.sig`, written by tauri-cli with
+  `createUpdaterArtifacts`) is on the release. The updater installs them with
+  `dpkg -i` / `rpm -U` through pkexec. `verify-release` requires the entry for
+  every signed package and rejects one for an unsigned package.
 - **Pre-commit size**: the kit manifest carries a per-platform `size`
   (bytes) extension; the check command reads it so the UI can say
   "Download Update (42.3 MB)" *before* the user commits.

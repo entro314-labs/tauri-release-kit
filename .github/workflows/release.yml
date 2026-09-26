@@ -1611,6 +1611,17 @@ jobs:
               { key: 'linux-x86_64', kind: 'sig', test: (n) => n.endsWith('.AppImage.sig') && /(_|-)amd64\b/i.test(n) },
               { key: 'linux-aarch64', kind: 'url', test: (n) => n.endsWith('.AppImage') && /(_|-)aarch64\b/i.test(n) },
               { key: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('.AppImage.sig') && /(_|-)aarch64\b/i.test(n) },
+              // Installer-specific entries: tauri-plugin-updater tries `<os>-<arch>-<installer>`
+              // before `<os>-<arch>`, so a .deb/.rpm install updates from its own package
+              // (dpkg / rpm through pkexec) instead of being handed the AppImage.
+              { key: 'linux-x86_64-deb', base: 'linux-x86_64', kind: 'url', test: (n) => n.endsWith('_amd64.deb') },
+              { key: 'linux-x86_64-deb', base: 'linux-x86_64', kind: 'sig', test: (n) => n.endsWith('_amd64.deb.sig') },
+              { key: 'linux-x86_64-rpm', base: 'linux-x86_64', kind: 'url', test: (n) => n.endsWith('.x86_64.rpm') },
+              { key: 'linux-x86_64-rpm', base: 'linux-x86_64', kind: 'sig', test: (n) => n.endsWith('.x86_64.rpm.sig') },
+              { key: 'linux-aarch64-deb', base: 'linux-aarch64', kind: 'url', test: (n) => n.endsWith('_arm64.deb') },
+              { key: 'linux-aarch64-deb', base: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('_arm64.deb.sig') },
+              { key: 'linux-aarch64-rpm', base: 'linux-aarch64', kind: 'url', test: (n) => n.endsWith('.aarch64.rpm') },
+              { key: 'linux-aarch64-rpm', base: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('.aarch64.rpm.sig') },
             ];
 
             const fetchSignatureBody = async (assetId) => {
@@ -1625,10 +1636,16 @@ jobs:
             // an `untagged-<hash>` path that 404s publicly and BREAKS after
             // the draft is published under its real tag.
             const tagBase = `https://github.com/${owner}/${repo}/releases/download/${version}/`;
+            const installerKeys = new Set();
             for (const asset of assets) {
               for (const matcher of matchers) {
                 // Matchers for platforms outside the app's target set are inert.
-                if (!(matcher.key in platforms) || !matcher.test(asset.name)) continue;
+                const shipped = matcher.base ? matcher.base in platforms : matcher.key in platforms;
+                if (!shipped || !matcher.test(asset.name)) continue;
+                if (matcher.base && !(matcher.key in platforms)) {
+                  platforms[matcher.key] = { signature: null, url: null, size: null };
+                  installerKeys.add(matcher.key);
+                }
                 if (matcher.kind === 'url') {
                   platforms[matcher.key].url = tagBase + encodeURIComponent(asset.name);
                   platforms[matcher.key].size = asset.size;
@@ -1637,6 +1654,13 @@ jobs:
                 }
                 break;
               }
+            }
+
+            // An installer entry needs both its package and the package's updater
+            // signature (a CLI too old to sign .deb/.rpm writes none); without both,
+            // those installs keep updating through their package manager.
+            for (const key of installerKeys) {
+              if (!platforms[key].url || !platforms[key].signature) delete platforms[key];
             }
 
             // Incomplete entries stay: verify-release fails loudly rather than

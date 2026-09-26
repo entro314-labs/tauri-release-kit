@@ -15,6 +15,7 @@ import {
   checksumAssets,
   compareAssets,
   expectedAssets,
+  installerEntries,
   loadAppNaming,
   manifestName,
   pubkeyKeyId,
@@ -212,6 +213,42 @@ test('checkManifest: missing .sig asset, non-minisign signature, extra platform'
   assert.deepEqual(r.platforms, ['darwin-aarch64 not shipped'])
   assert.deepEqual(r.signatures, ['linux-x86_64: MyApp_1.2.3_amd64.AppImage.sig is not on the release'])
   assert.deepEqual(r.envelopes, ['linux-x86_64: signature is not a minisign envelope'])
+})
+
+test('installerEntries names the .deb and .rpm a Linux target updates from', () => {
+  assert.deepEqual(installerEntries('linux-x86_64', naming, '1.2.3'), [
+    { key: 'linux-x86_64-deb', asset: 'MyApp_1.2.3_amd64.deb' },
+    { key: 'linux-x86_64-rpm', asset: 'MyApp-1.2.3-1.x86_64.rpm' },
+  ])
+  assert.deepEqual(installerEntries('linux-aarch64', naming, '1.2.3').map((e) => e.asset), ['MyApp_1.2.3_arm64.deb', 'MyApp-1.2.3-1.aarch64.rpm'])
+  assert.deepEqual(installerEntries('darwin-aarch64', naming, '1.2.3'), [])
+})
+
+test('checkManifest requires an installer entry for every signed package, and only those', () => {
+  const targets = ['linux-x86_64']
+  const manifest = goodManifest(targets)
+  const sigs = goodSigs(targets)
+  sigs.set('MyApp_1.2.3_amd64.deb.sig', SIG)
+  sigs.set('MyApp-1.2.3-1.x86_64.rpm.sig', SIG)
+  manifest.platforms['linux-x86_64-deb'] = { url: `${BASE}MyApp_1.2.3_amd64.deb`, signature: SIG }
+  manifest.platforms['linux-x86_64-rpm'] = { url: `${BASE}MyApp-1.2.3-1.x86_64.rpm`, signature: SIG }
+  const ok = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(ok, { version: [], platforms: [], urls: [], signatures: [], envelopes: [] })
+
+  // A signed .deb the manifest forgot, and an .rpm entry pointing at the AppImage.
+  delete manifest.platforms['linux-x86_64-deb']
+  manifest.platforms['linux-x86_64-rpm'].url = `${BASE}MyApp_1.2.3_amd64.AppImage`
+  const bad = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(bad.platforms, ['linux-x86_64-deb missing'])
+  assert.deepEqual(bad.urls, ['linux-x86_64-rpm: points at MyApp_1.2.3_amd64.AppImage, expected MyApp-1.2.3-1.x86_64.rpm'])
+
+  // An installer entry for a package without an updater signature on the release.
+  const unsigned = checkManifest({ manifest: goodManifest(targets), version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: goodSigs(targets), stored: new Map() })
+  assert.deepEqual(unsigned.platforms, [])
+  const extra = goodManifest(targets)
+  extra.platforms['linux-x86_64-rpm'] = { url: `${BASE}MyApp-1.2.3-1.x86_64.rpm`, signature: SIG }
+  const r = checkManifest({ manifest: extra, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: goodSigs(targets), stored: new Map() })
+  assert.deepEqual(r.platforms, ['linux-x86_64-rpm not shipped'])
 })
 
 const ZERO = '0'.repeat(64)

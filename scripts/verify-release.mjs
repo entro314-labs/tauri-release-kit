@@ -14,9 +14,10 @@
  *     every SHIPPED target (not just this run's build set), their updater signatures, and the
  *     channel manifest — both missing and unexpected names are failures
  *   - every asset is non-empty and GitHub has computed its sha256 digest
- *   - the updater manifest has the right version, exactly the shipped platform set, and every
- *     URL points at the serving repo's download path for this tag and at that platform's
- *     updater artifact
+ *   - the updater manifest has the right version, exactly the shipped platform set (plus a
+ *     `<target>-deb` / `<target>-rpm` entry for every Linux package whose updater signature is
+ *     on the release), and every URL points at the serving repo's download path for this tag
+ *     and at that entry's updater artifact
  *   - every manifest signature equals the uploaded .sig byte for byte, decodes to a minisign
  *     envelope, and was made by the key whose public half the app ships
  *     (plugins.updater.pubkey) — the tauri CLI only warns about a mismatched key, and a
@@ -183,6 +184,28 @@ export function updaterAsset(target, naming, version) {
 }
 
 /**
+ * The installer-specific updater entries a Linux target gets next to its AppImage one:
+ * `<target>-deb` and `<target>-rpm`. tauri-plugin-updater looks up `<os>-<arch>-<installer>`
+ * before `<os>-<arch>`, so a copy installed from the .deb updates from the .deb (dpkg through
+ * pkexec) instead of being handed the AppImage, which it can't install. An entry exists only
+ * when the package's updater signature is on the release — a CLI too old to sign packages
+ * leaves those installs on the package manager, exactly as before.
+ * @param {string} target
+ * @param {ReturnType<typeof appNaming>} naming
+ * @param {string} version bare version (no leading v)
+ * @returns {{ key: string, asset: string }[]}
+ */
+export function installerEntries(target, naming, version) {
+  const t = TARGETS[target]
+  if (!t || t.os !== 'linux') return []
+  const p = naming.linux.product
+  return [
+    { key: `${target}-deb`, asset: `${p}_${version}_${t.deb}.deb` },
+    { key: `${target}-rpm`, asset: `${p}-${version}-${naming.linux.rpmRelease}.${t.rpm}.rpm` },
+  ]
+}
+
+/**
  * Every asset this configuration must put on the release, and the ones it may.
  *
  * Optional: the .deb/.rpm updater signatures, which tauri-cli emits only from the release
@@ -309,14 +332,23 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
   if (manifest?.version !== version) out.version.push(`manifest says ${JSON.stringify(manifest?.version)}, tag says ${version}`)
   const platforms = manifest?.platforms && typeof manifest.platforms === 'object' ? manifest.platforms : {}
   const have = Object.keys(platforms)
-  for (const t of targets) if (!have.includes(t)) out.platforms.push(`${t} missing`)
-  for (const p of have) if (!targets.includes(p)) out.platforms.push(`${p} not shipped`)
+
+  // Every entry the manifest must carry: one per shipped target, plus an installer entry for
+  // each Linux package whose updater signature is on the release (see installerEntries).
+  const wanted = targets.map((target) => ({ key: target, asset: updaterAsset(target, naming, version) }))
+  for (const target of targets) {
+    for (const entry of installerEntries(target, naming, version)) {
+      if (sigFiles.has(stored.get(`${entry.asset}.sig`) ?? `${entry.asset}.sig`)) wanted.push(entry)
+    }
+  }
+  const wantedKeys = wanted.map((entry) => entry.key)
+  for (const key of wantedKeys) if (!have.includes(key)) out.platforms.push(`${key} missing`)
+  for (const p of have) if (!wantedKeys.includes(p)) out.platforms.push(`${p} not shipped`)
 
   const wantKey = pubkeyKeyId(naming.pubkey)
-  for (const target of targets) {
+  for (const { key: target, asset: uploaded } of wanted) {
     const entry = platforms[target]
     if (!entry) continue
-    const uploaded = updaterAsset(target, naming, version)
     // The URL must use the name GitHub serves the file under.
     const asset = stored.get(uploaded) ?? uploaded
     const url = String(entry.url ?? '')
