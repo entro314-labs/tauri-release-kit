@@ -283,11 +283,36 @@ on:
         required: false
         type: boolean
         default: false
+      winget_identifier:
+        description: >-
+          winget PackageIdentifier (e.g. 'MyOrg.MyApp') to submit each STABLE
+          release to microsoft/winget-pkgs with. Empty = no winget. Needs the
+          WINGET_TOKEN secret and a one-time manual first submission (README,
+          "winget and Scoop").
+        required: false
+        type: string
+        default: ''
+      winget_fork_user:
+        description: >-
+          Owner of the winget-pkgs fork WINGET_TOKEN pushes the manifest branch
+          to. Empty = this repo's owner (winget-releaser's default).
+        required: false
+        type: string
+        default: ''
+      scoop_bucket:
+        description: >-
+          'owner/name' of a Scoop bucket repo whose bucket/<product_name
+          lowercased>.json is updated (version, url, hash) on each STABLE
+          release. Empty = no Scoop. Needs product_name, the manifest created
+          once by hand, and SCOOP_TAP_TOKEN or the GitHub App.
+        required: false
+        type: string
+        default: ''
       app_client_id:
         description: >-
           Client ID of a GitHub App used INSTEAD of the RELEASES_TOKEN /
-          HOMEBREW_TAP_TOKEN PATs for every cross-repo write (releases_repo,
-          homebrew_tap). Needs the APP_PRIVATE_KEY secret, and the App
+          HOMEBREW_TAP_TOKEN / SCOOP_TAP_TOKEN PATs for every cross-repo write
+          (releases_repo, homebrew_tap, scoop_bucket). Needs the APP_PRIVATE_KEY secret, and the App
           installed on each of those repos with Contents: Read and write. Each
           job mints its own token scoped to exactly the repo it writes. Empty
           = the PATs, as before. See the README, "GitHub App instead of PATs".
@@ -321,7 +346,13 @@ on:
         description: 'Fine-grained PAT with Contents:RW on homebrew_tap. Cask publishing skips with a warning when absent.'
         required: false
       APP_PRIVATE_KEY:
-        description: 'Private key (.pem contents) of the GitHub App named by app_client_id. Replaces RELEASES_TOKEN and HOMEBREW_TAP_TOKEN when set.'
+        description: 'Private key (.pem contents) of the GitHub App named by app_client_id. Replaces RELEASES_TOKEN, HOMEBREW_TAP_TOKEN and SCOOP_TAP_TOKEN when set.'
+        required: false
+      WINGET_TOKEN:
+        description: 'Classic PAT (public_repo) of the account owning the winget-pkgs fork. winget submission skips with a warning when absent.'
+        required: false
+      SCOOP_TAP_TOKEN:
+        description: 'Fine-grained PAT with Contents:RW on scoop_bucket (same name as go-release-kit). Not needed with the GitHub App.'
         required: false
       APPLE_CERTIFICATE:
         required: false
@@ -2395,6 +2426,182 @@ jobs:
           git commit -m "${PRODUCT}: update ${CASK_TOKEN} to ${BARE}"
           git push origin HEAD
           echo "Published ${CASK_TOKEN} ${BARE} to ${TAP_REPO}"
+
+  # Submit STABLE releases to winget (microsoft/winget-pkgs) through
+  # vedantmgoyal9/winget-releaser, which runs komac to open the version PR
+  # from the fork. Prereleases never go to winget. Skips with a warning when
+  # WINGET_TOKEN is absent; a token that cannot push to its fork fails here in
+  # seconds instead of deep inside komac.
+  #
+  # The package must already exist in winget-pkgs — the first version is
+  # submitted by hand once (README, "winget and Scoop"). Note what the action
+  # itself pulls at run time: cargo-bins/cargo-binstall@main and the latest
+  # komac, neither pinned by the action.
+  publish-winget:
+    needs: [check-changelog, create-release, publish-release, plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ inputs.environment }}
+    # The action reads the published release with github.token.
+    permissions:
+      contents: read
+    if: always() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.winget_identifier != ''
+    steps:
+      - name: Check winget prerequisites
+        id: prereq
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          FORK_USER: ${{ inputs.winget_fork_user || github.repository_owner }}
+          REL_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          WINDOWS_BUNDLES: ${{ needs.plan.outputs.windows_bundles }}
+        run: |
+          set -euo pipefail
+          skip() { echo "ready=false" >> "$GITHUB_OUTPUT"; echo "::warning::$1 — skipping winget"; exit 0; }
+          [ -n "${WINGET_TOKEN:-}" ] || skip "WINGET_TOKEN secret missing"
+          X64=false; ARM=false
+          case ",$TARGETS," in *",windows-x86_64,"*) X64=true ;; esac
+          case ",$TARGETS," in *",windows-aarch64,"*) ARM=true ;; esac
+          [ "$X64" = true ] || [ "$ARM" = true ] || skip "no Windows targets in this app's target set"
+          # winget-releaser looks the release up under github.repository_owner.
+          [ "$REL_OWNER" = "$GITHUB_REPOSITORY_OWNER" ] \
+            || skip "the releases repo belongs to ${REL_OWNER}, but winget-releaser only reads releases owned by ${GITHUB_REPOSITORY_OWNER}"
+          if ! PUSH="$(GH_TOKEN="$WINGET_TOKEN" gh api "repos/${FORK_USER}/winget-pkgs" --jq '.permissions.push' 2>"${RUNNER_TEMP}/gh.err")"; then
+            echo "::error::WINGET_TOKEN cannot read ${FORK_USER}/winget-pkgs: $(head -1 "${RUNNER_TEMP}/gh.err") — fork microsoft/winget-pkgs to that account, or set winget_fork_user"
+            exit 1
+          fi
+          if [ "$PUSH" != true ]; then
+            echo "::error::WINGET_TOKEN cannot push to ${FORK_USER}/winget-pkgs — use a PAT (public_repo) of the account that owns the fork, or set winget_fork_user"
+            exit 1
+          fi
+          # The MSI when it ships: komac reads an MSI from its WiX tables, but
+          # has to emulate an NSIS script, and skriuw's submissions of tauri
+          # NSIS installers aborted in the WebView2 downloadBootstrapper branch
+          # ("Failed to install WebView2!") until it switched to the MSI. There
+          # is no ARM64 MSI, so arm64 always ships its NSIS installer. The regex
+          # reaches pwsh inside single quotes: it must never contain one.
+          PARTS=()
+          if [ "$X64" = true ]; then
+            case ",$WINDOWS_BUNDLES," in
+              *",msi,"*) PARTS+=('_x64_[A-Za-z0-9-]+\.msi') ;;
+              *) PARTS+=('_x64-setup\.exe') ;;
+            esac
+          fi
+          [ "$ARM" = true ] && PARTS+=('_arm64-setup\.exe')
+          REGEX="($(IFS='|'; echo "${PARTS[*]}"))\$"
+          {
+            echo "ready=true"
+            echo "fork_user=${FORK_USER}"
+            echo "regex=${REGEX}"
+          } >> "$GITHUB_OUTPUT"
+          echo "winget installers matching ${REGEX}; fork ${FORK_USER}/winget-pkgs"
+
+      - name: Submit to winget
+        if: steps.prereq.outputs.ready == 'true'
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          # No `version`: the action takes it from the tag, minus the leading v.
+          identifier: ${{ inputs.winget_identifier }}
+          release-repository: ${{ needs.check-changelog.outputs.releases_name }}
+          release-tag: ${{ needs.check-changelog.outputs.version }}
+          installers-regex: ${{ steps.prereq.outputs.regex }}
+          fork-user: ${{ steps.prereq.outputs.fork_user }}
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  # Update a Scoop bucket's manifest for STABLE releases: version, and the
+  # url + hash of the NSIS installer per shipped architecture (64bit, arm64).
+  # The manifest is created once by hand (README, "winget and Scoop") — how
+  # the app installs is the bucket owner's decision; this only moves it to the
+  # new release. A URL fragment such as `#/dl.7z` in the existing url is kept.
+  # The hash is GitHub's sha256 digest of the published asset.
+  publish-scoop:
+    needs: [check-changelog, create-release, publish-release, plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    # Pushes with SCOOP_TAP_TOKEN or the GitHub App; no GITHUB_TOKEN use.
+    permissions: {}
+    if: always() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.scoop_bucket != ''
+    steps:
+      - name: Resolve bucket
+        id: bucket
+        env:
+          BUCKET: ${{ inputs.scoop_bucket }}
+        run: |
+          { echo "owner=${BUCKET%%/*}"; echo "name=${BUCKET##*/}"; } >> "$GITHUB_OUTPUT"
+
+      # With app_client_id the App replaces SCOOP_TAP_TOKEN and must be
+      # installed on the bucket.
+      - name: Mint bucket token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.bucket.outputs.owner }}
+          repositories: ${{ steps.bucket.outputs.name }}
+          permission-contents: write
+
+      - name: Update and push the Scoop manifest
+        env:
+          TOKEN: ${{ steps.app_token.outputs.token || secrets.SCOOP_TAP_TOKEN }}
+          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
+          BUCKET: ${{ inputs.scoop_bucket }}
+          PRODUCT: ${{ inputs.product_name }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          VERSION: ${{ needs.check-changelog.outputs.version }}
+          REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
+        run: |
+          set -euo pipefail
+          skip() { echo "::warning::$1 — skipping Scoop"; exit 0; }
+          [ -n "${TOKEN:-}" ] || skip "neither SCOOP_TAP_TOKEN nor app_client_id is set"
+          [ -n "$PRODUCT" ] || skip "product_name is not set (the manifest is bucket/<product_name lowercased>.json)"
+          case ",$TARGETS," in *",windows-"*) ;; *) skip "no Windows targets in this app's target set" ;; esac
+          BARE="${VERSION#v}"
+          MANIFEST="bucket/$(printf '%s' "$PRODUCT" | tr '[:upper:]' '[:lower:]').json"
+          GH_TOKEN="$TOKEN" gh api "repos/${REPO}/releases/tags/${VERSION}" > "${RUNNER_TEMP}/release.json"
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${BUCKET}.git" bucket-repo
+          cd bucket-repo
+          [ -f "$MANIFEST" ] || skip "${BUCKET} has no ${MANIFEST} yet — create it once by hand (README, \"winget and Scoop\")"
+          # One NSIS installer per shipped Windows arch; Scoop's architecture keys.
+          # shellcheck disable=SC2016 # a jq program: $v is jq's variable, not the shell's
+          UPDATE='.version = $v'
+          ARGS=(--arg v "$BARE")
+          for pair in "windows-x86_64:64bit:x64" "windows-aarch64:arm64:arm64"; do
+            IFS=: read -r TARGET KEY ARCH <<<"$pair"
+            case ",$TARGETS," in *",${TARGET},"*) ;; *) continue ;; esac
+            ASSET="$(jq -r --arg s "_${ARCH}-setup.exe" '[.assets[] | select(.name | endswith($s))][0] // empty | "\(.name) \(.digest)"' "${RUNNER_TEMP}/release.json")"
+            NAME="${ASSET%% *}"; DIGEST="${ASSET##* }"
+            if [ -z "$NAME" ] || ! printf '%s' "$DIGEST" | grep -Eq '^sha256:[a-f0-9]{64}$'; then
+              echo "::error::No *_${ARCH}-setup.exe with a sha256 digest on ${REPO}@${VERSION}"
+              exit 1
+            fi
+            URL="https://github.com/${REPO}/releases/download/${VERSION}/${NAME}"
+            ARGS+=(--arg "u_${KEY}" "$URL" --arg "h_${KEY}" "${DIGEST#sha256:}")
+            # Keep a fragment the bucket owner added (e.g. #/dl.7z for extraction).
+            UPDATE+=" | .architecture[\"${KEY}\"].url = (\$u_${KEY} + ((.architecture[\"${KEY}\"].url // \"\") | capture(\"(?<f>#.*)$\").f // \"\"))"
+            UPDATE+=" | .architecture[\"${KEY}\"].hash = \$h_${KEY}"
+          done
+          jq "${ARGS[@]}" "$UPDATE" "$MANIFEST" > "${MANIFEST}.tmp"
+          mv "${MANIFEST}.tmp" "$MANIFEST"
+          git diff
+          if [ -n "${APP_SLUG:-}" ]; then
+            BOT_ID="$(GH_TOKEN="$TOKEN" gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${BOT_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name "release-kit-bot"
+            git config user.email "releases@users.noreply.github.com"
+          fi
+          git add "$MANIFEST"
+          if git diff --cached --quiet; then
+            echo "Scoop manifest already at ${BARE}."
+            exit 0
+          fi
+          git commit -m "$(basename "$MANIFEST" .json): update to ${BARE}"
+          git push origin HEAD
+          echo "::notice::Updated ${BUCKET}/${MANIFEST} to ${BARE}"
 
   # Post-release patch bump PR (stable releases only; opt out via
   # post_release_bump when a local driver bumps before tagging). Default

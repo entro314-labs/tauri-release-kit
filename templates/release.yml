@@ -111,6 +111,13 @@ jobs:
       cask_desc: 'One-line app description'
       cask_homepage: 'https://example.com'
       bundle_identifier: 'com.example.myapp' # ← tauri.conf.json identifier (cask zap paths)
+      # --- winget + Scoop (optional, stable releases only). winget needs the
+      #     WINGET_TOKEN secret and a one-time manual first submission; Scoop
+      #     needs bucket/<product_name lowercased>.json created once, and
+      #     SCOOP_TAP_TOKEN or the GitHub App. Kit README: "winget and Scoop".
+      # winget_identifier: 'MyOrg.MyApp'
+      # winget_fork_user: 'my-user'    # ← owner of the winget-pkgs fork, if not this org
+      # scoop_bucket: 'my-org/scoop-bucket'
     secrets: inherit
 
   # --- OPTIONAL: Flatpak. Repacks the released .deb into a Flatpak bundle,

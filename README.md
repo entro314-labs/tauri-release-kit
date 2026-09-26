@@ -41,6 +41,8 @@ last three chain off `release.yml` with `needs:` in one caller file; see
 | Direct download (dmg / setup.exe / AppImage / deb / rpm) | source | `release.yml` |
 | Auto-updater (per channel) | the above | `release.yml` |
 | Homebrew cask | the released `.dmg` | `release.yml` (`homebrew_tap`) |
+| winget (stable only) | the released MSI / NSIS installer | `release.yml` (`winget_identifier`) |
+| Scoop bucket (stable only) | the released NSIS installer | `release.yml` (`scoop_bucket`) |
 | Flathub / Flatpak bundle | the released `.deb` | `flatpak.yml` |
 | Arch User Repository | the released `.deb` | `aur.yml` |
 | Mac App Store / iOS App Store | source (separate, sandboxed build) | `app-store.yml` |
@@ -201,6 +203,58 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      tauri-action deletes same-named assets before re-uploading, and the
      updater manifest is rebuilt and replaced on every attempt.
 
+## winget and Scoop
+
+Both run after publish, for **stable** releases only, and skip with a warning
+when their credential is missing.
+
+**winget** (`winget_identifier: 'MyOrg.MyApp'` + the `WINGET_TOKEN` secret):
+[winget-releaser](https://github.com/vedantmgoyal9/winget-releaser) (komac)
+opens the version PR on microsoft/winget-pkgs from a fork.
+
+- One-time: the package must already exist in winget-pkgs — submit the first
+  version by hand (`wingetcreate new <installer URL>` or `komac new`) and wait
+  for that PR to merge. Until then the job fails.
+- `WINGET_TOKEN` is a classic PAT with `public_repo` from the account that
+  owns a fork of microsoft/winget-pkgs; that account defaults to the app
+  repo's owner, `winget_fork_user` overrides it. The job checks it can push to
+  the fork before calling the action.
+- Installers: the x64 MSI when `windows_bundles` includes `msi` (komac reads
+  MSIs from their tables; its emulation of tauri's NSIS script has aborted in
+  the WebView2 bootstrapper branch for another tauri app), otherwise the x64
+  `-setup.exe`; arm64 always ships its `-setup.exe`. Ship one WiX language, or
+  every language's MSI is submitted.
+- The releases repo must belong to the same owner as the app repo (the action
+  looks the release up under the app repo's owner); otherwise the job skips
+  with a warning.
+- The action installs `cargo-binstall` from its `main` branch and the latest
+  komac at run time — neither is pinned by it.
+
+**Scoop** (`scoop_bucket: 'my-org/scoop-bucket'` + `product_name` + the
+`SCOOP_TAP_TOKEN` secret or the GitHub App): updates
+`bucket/<product_name lowercased>.json` in the bucket — `version`, and
+`architecture.64bit` / `arm64` `url` + `hash` from the published NSIS
+installers (GitHub's sha256 digest). Create the manifest once by hand; how the
+app installs is yours to define, the job only moves it forward. A URL
+fragment you add (e.g. `#/dl.7z`) is kept. One possible starting point (the
+executable is your main binary's name, usually the Cargo package name):
+
+```json
+{
+  "version": "0.0.0",
+  "description": "My App",
+  "homepage": "https://example.com",
+  "license": "MIT",
+  "architecture": { "64bit": { "url": "", "hash": "" } },
+  "installer": { "args": ["/S", "/D=$dir"] },
+  "uninstaller": { "file": "uninstall.exe", "args": ["/S"] },
+  "bin": "myapp.exe",
+  "shortcuts": [["myapp.exe", "My App"]]
+}
+```
+
+The secret names match go-release-kit (`WINGET_TOKEN`, `SCOOP_TAP_TOKEN`).
+
 ## Guarding the stable update channel
 
 Stable clients poll `releases/latest/download/latest.json`, and GitHub gives
@@ -232,13 +286,15 @@ not the code, in a few minutes:
 | `AZURE_*` + `windows_azure_*` | a client-credentials token request for the service principal (the signing role itself is not checked) |
 | `LINUX_GPG_PRIVATE_KEY` (+ passphrase, key id) | imported into a scratch keyring and used to sign |
 | GitHub App (`app_client_id` + `APP_PRIVATE_KEY`) | a token is minted for the releases repo and the tap, as release.yml does — that fails unless the App is installed there with Contents: write |
-| `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN` (when no App) | `gh api repos/<repo> --jq .permissions.push` must be `true` |
+| `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN`, `SCOOP_TAP_TOKEN` (when no App) | `gh api repos/<repo> --jq .permissions.push` must be `true` |
+| `WINGET_TOKEN` | can push to `<winget_fork_user>/winget-pkgs`; warns while the package is not in winget-pkgs yet |
 
 An optional credential that is not configured is a notice; one that is set but
 broken, or half-configured, fails — every check runs, so one run lists all
 problems. The macOS and Windows jobs start only when their secrets exist.
 Pass the same `project_path`, `releases_repo`, `homebrew_tap`,
-`windows_azure_*`, `app_client_id` and `environment` values as your release
+`winget_identifier`, `winget_fork_user`, `scoop_bucket`, `windows_azure_*`,
+`app_client_id` and `environment` values as your release
 caller.
 
 ## Cross-repo credentials
@@ -295,10 +351,12 @@ expiry — `credentials.yml` checks they can still push.
 `release.yml` takes an optional `environment` input. When set, every job that
 reads a signing or publishing secret (`check-changelog`, `create-release`,
 `build-and-release`, `create-updater-json`, `checksums`, `attest`,
-`verify-release`, `publish-release`, `publish-homebrew-cask`) runs in that
+`verify-release`, `publish-release`, `publish-homebrew-cask`,
+`publish-winget`, `publish-scoop`) runs in that
 GitHub environment,
 so `TAURI_SIGNING_PRIVATE_KEY`, the Apple/Windows/Linux signing secrets,
-`APP_PRIVATE_KEY`, `RELEASES_TOKEN` and `HOMEBREW_TAP_TOKEN` can be moved out of repo-level
+`APP_PRIVATE_KEY`, `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN`, `WINGET_TOKEN` and
+`SCOOP_TAP_TOKEN` can be moved out of repo-level
 secrets and behind the environment's protection rules. Things to know:
 
 - The environment is resolved in the **calling** (app) repo, like everything
