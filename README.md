@@ -27,8 +27,9 @@ encodes a CI failure that actually happened; read
 | `.github/workflows/flatpak.yml` | Repacks the released `.deb` into a Flatpak bundle + Flathub manifest |
 | `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
 | `.github/workflows/app-store.yml` | Builds and uploads a Mac App Store `.pkg` / iOS `.ipa` |
+| `.github/workflows/credentials.yml` | Credential preflight: proves the signing/publishing secrets still work, without building |
 
-All six are `workflow_call` reusable workflows — fixes land here once and
+All seven are `workflow_call` reusable workflows — fixes land here once and
 every app picks them up. Pin `@main` for latest or a tag for stability. The
 last three chain off `release.yml` with `needs:` in one caller file; see
 [`templates/release.yml`](templates/release.yml).
@@ -65,6 +66,9 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      comma-separated list of advisory IDs you have accepted
      (`'RUSTSEC-2024-0370,RUSTSEC-2025-0012'` — write down why next to it).
      An unrecognised ID fails the job rather than ignoring nothing.
+   - `templates/credentials.yml` → `.github/workflows/credentials.yml`
+     (dispatch it before a release to prove the secrets still work — see
+     "Credential preflight")
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
    - version bumping: either `scripts/version-manager.ts` → `tooling/scripts/`
@@ -191,6 +195,28 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    - Retrying a leg that failed AFTER uploading its assets is safe:
      tauri-action deletes same-named assets before re-uploading, and the
      updater manifest is rebuilt and replaced on every attempt.
+
+## Credential preflight
+
+`templates/credentials.yml` → `.github/workflows/credentials.yml` gives you a
+dispatch-only workflow (optionally scheduled) that checks the credentials,
+not the code, in a few minutes:
+
+| Credential | Check |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` (+ password) | signs a scratch file with the tauri CLI exactly as the build decrypts it, and the signature's key id must equal `plugins.updater.pubkey`'s |
+| `APPLE_CERTIFICATE` / `_PASSWORD` / `APPLE_SIGNING_IDENTITY` | imported into a throwaway keychain; the identity must be listed by `security find-identity -v -p codesigning` |
+| notarization (API key or Apple ID) | one authenticated `xcrun notarytool history` call |
+| `WINDOWS_CERTIFICATE` / `_PASSWORD` (/ `_THUMBPRINT`) | `Import-PfxCertificate` must land a certificate with its private key, matching the pinned thumbprint, not expired (warning inside 30 days) |
+| `AZURE_*` + `windows_azure_*` | a client-credentials token request for the service principal (the signing role itself is not checked) |
+| `LINUX_GPG_PRIVATE_KEY` (+ passphrase, key id) | imported into a scratch keyring and used to sign |
+| `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN` | `gh api repos/<repo> --jq .permissions.push` must be `true` |
+
+An optional credential that is not configured is a notice; one that is set but
+broken, or half-configured, fails — every check runs, so one run lists all
+problems. The macOS and Windows jobs start only when their secrets exist.
+Pass the same `project_path`, `releases_repo`, `homebrew_tap`,
+`windows_azure_*` and `environment` values as your release caller.
 
 ## Cross-repo tokens
 

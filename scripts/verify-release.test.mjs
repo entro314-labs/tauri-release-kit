@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -154,7 +154,7 @@ test('assetIntegrity flags empty assets and missing digests', () => {
 })
 
 test('minisign key ids from real tauri output', () => {
-  assert.equal(pubkeyKeyId(PUBKEY), '01d83dabd3f7961f')
+  assert.equal(pubkeyKeyId(PUBKEY), '1F96F7D3AB3DD801') // as in the pubkey's own comment line
   assert.equal(signatureKeyId(SIG), pubkeyKeyId(PUBKEY))
   assert.notEqual(pubkeyKeyId(OTHER_PUBKEY), pubkeyKeyId(PUBKEY))
   assert.equal(signatureKeyId('not base64!'), null)
@@ -194,7 +194,7 @@ test('checkManifest catches wrong repo, wrong asset, stale sig, foreign key, pla
   assert.match(r.urls[1], /expected MyApp_1.2.3_x64-setup.exe/)
   assert.deepEqual(r.signatures, ['linux-x86_64: signature differs from MyApp_1.2.3_amd64.AppImage.sig'])
   assert.equal(r.envelopes.length, 3)
-  assert.match(r.envelopes[0], /01D83DABD3F7961F/)
+  assert.match(r.envelopes[0], /signed by key 1F96F7D3AB3DD801, but plugins.updater.pubkey is B7C118571ACF640A/)
 })
 
 test('checkManifest: missing .sig asset, non-minisign signature, extra platform', () => {
@@ -352,4 +352,23 @@ test('CLI prints the SBOM product name', () => {
   const script = new URL('./verify-release.mjs', import.meta.url).pathname
   assert.equal(execFileSync(process.execPath, [script, 'product', dir], { encoding: 'utf8' }), 'My.App\n')
   assert.throws(() => execFileSync(process.execPath, [script], { stdio: 'pipe' }))
+})
+
+test('CLI updater-key: match, mismatch, no inline pubkey, not a signature', () => {
+  const script = new URL('./verify-release.mjs', import.meta.url).pathname
+  const dir = mkdtempSync(join(tmpdir(), 'rk-key-'))
+  const sig = join(dir, 'f.sig')
+  writeFileSync(sig, SIG)
+  const call = (pubkey, file = sig) => {
+    writeFileSync(join(dir, 'tauri.conf.json'), JSON.stringify({ productName: 'A', plugins: { updater: { pubkey } } }))
+    const r = spawnSync(process.execPath, [script, 'updater-key', file, dir], { encoding: 'utf8' })
+    return { code: r.status, out: r.stdout }
+  }
+  assert.equal(call(PUBKEY).code, 0)
+  const bad = call(OTHER_PUBKEY)
+  assert.equal(bad.code, 1)
+  assert.match(bad.out, /signed with key 1F96F7D3AB3DD801; plugins.updater.pubkey is key/)
+  assert.equal(call('./keys/updater.pub').code, 3)
+  writeFileSync(join(dir, 'junk.sig'), 'nope')
+  assert.equal(call(PUBKEY, join(dir, 'junk.sig')).code, 1)
 })

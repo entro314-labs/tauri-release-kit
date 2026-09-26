@@ -32,7 +32,7 @@
  * characters in asset names.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -250,7 +250,7 @@ export function assetIntegrity(assets) {
 
 /**
  * Decodes a tauri updater signature (base64 of a minisign signature box) and returns the
- * signing key's 8-byte key id as hex, or null when it is not a minisign envelope.
+ * signing key's id as minisign prints it, or null when it is not a minisign envelope.
  * @param {string} signature
  * @returns {string | null}
  */
@@ -262,7 +262,7 @@ export function signatureKeyId(signature) {
   const sig = Buffer.from(lines[1] ?? '', 'base64')
   // "Ed" (legacy) or "ED" (prehashed) + 8-byte key id + 64-byte Ed25519 signature
   if (sig.length !== 74 || sig[0] !== 0x45 || (sig[1] !== 0x64 && sig[1] !== 0x44)) return null
-  return sig.subarray(2, 10).toString('hex')
+  return keyIdHex(sig.subarray(2, 10))
 }
 
 /**
@@ -275,7 +275,12 @@ export function pubkeyKeyId(pubkey) {
   if (!lines[0]?.startsWith('untrusted comment:')) return null
   const key = Buffer.from(lines[1] ?? '', 'base64')
   if (key.length !== 42 || key[0] !== 0x45 || key[1] !== 0x64) return null
-  return key.subarray(2, 10).toString('hex')
+  return keyIdHex(key.subarray(2, 10))
+}
+
+/** minisign prints a key id as its 8 bytes little-endian, upper-case hex (the pubkey's comment line). */
+function keyIdHex(bytes) {
+  return Buffer.from(bytes).reverse().toString('hex').toUpperCase()
 }
 
 /**
@@ -310,7 +315,7 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
 
     const keyId = signatureKeyId(entry.signature)
     if (!keyId) out.envelopes.push(`${target}: signature is not a minisign envelope`)
-    else if (wantKey && keyId !== wantKey) out.envelopes.push(`${target}: signed by key ${keyId.toUpperCase()}, but plugins.updater.pubkey is ${wantKey.toUpperCase()}`)
+    else if (wantKey && keyId !== wantKey) out.envelopes.push(`${target}: signed by key ${keyId}, but plugins.updater.pubkey is ${wantKey}`)
   }
   return out
 }
@@ -510,13 +515,33 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
   core.info(`Verified ${release.assets.length} assets and ${targets.length} updater platforms on ${owner}/${repo} ${tag}.`)
 }
 
-// CLI: `node verify-release.mjs product <src-tauri dir>` prints the name the SBOMs are
-// published under, so the checksums job names them exactly as verification expects.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [command, dir] = process.argv.slice(2)
-  if (command !== 'product' || !dir) {
-    console.error('usage: node verify-release.mjs product <src-tauri dir>')
-    process.exit(2)
+// CLI, for workflow steps that need the same logic outside github-script:
+//   product <src-tauri dir>              the name the SBOMs are published under
+//   updater-key <.sig file> <src-tauri>  exit 0 when the signature was made by the key in
+//                                        plugins.updater.pubkey, 1 when not, 3 when the app
+//                                        has no inline pubkey to compare with
+// Exit codes are set via process.exitCode: stdout to a pipe is asynchronous off Linux, and
+// process.exit() can drop what was printed.
+// realpath: the module URL is resolved through symlinks, argv[1] is not.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  const [command, ...args] = process.argv.slice(2)
+  if (command === 'product' && args.length === 1) {
+    console.log(loadAppNaming(args[0]).product)
+  } else if (command === 'updater-key' && args.length === 2) {
+    const got = signatureKeyId(readFileSync(args[0], 'utf8'))
+    const want = pubkeyKeyId(loadAppNaming(args[1]).pubkey)
+    if (!got) {
+      console.log(`${args[0]} is not a minisign signature`)
+      process.exitCode = 1
+    } else if (!want) {
+      console.log(`plugins.updater.pubkey in ${args[1]} is missing or not an inline key; signed with key ${got}`)
+      process.exitCode = 3
+    } else {
+      console.log(`signed with key ${got}; plugins.updater.pubkey is key ${want}`)
+      process.exitCode = got === want ? 0 : 1
+    }
+  } else {
+    console.error('usage: node verify-release.mjs product <src-tauri dir> | updater-key <.sig file> <src-tauri dir>')
+    process.exitCode = 2
   }
-  console.log(loadAppNaming(dir).product)
 }
