@@ -228,6 +228,10 @@ secrets and behind the environment's protection rules. Things to know:
   branch/tag rules must admit the release tags (`v*`) and the branch you
   dispatch retries from.
 - Each environment-bearing job records a deployment on the app repo.
+- `TAURI_SIGNING_PRIVATE_KEY` is declared `required: true` by `release.yml`.
+  Whether GitHub's required-secret check at call time accepts it when it
+  exists only as an environment secret is unverified, so keep a repo-level
+  copy of that one until a live run shows it is not needed.
 - Empty (the default) means no environment, as before. GitHub does not
   document the empty-name case; GitHub Desktop's CI runs the same
   `environment: ${{ inputs.environment }}` pattern with an empty input on
