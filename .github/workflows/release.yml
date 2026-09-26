@@ -1337,7 +1337,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           BUNDLES: ${{ matrix.bundles }}
-          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
         run: |
           set -euo pipefail
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
@@ -1378,7 +1378,7 @@ jobs:
         shell: pwsh
         env:
           SIGN_MODE: ${{ steps.win_sign.outputs.mode }}
-          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
         run: |
           $ErrorActionPreference = 'Stop'
           $installers = @()
@@ -1493,7 +1493,7 @@ jobs:
         env:
           KEY_ID: ${{ steps.linux_sign.outputs.key_id }}
           BUNDLES: ${{ matrix.bundles }}
-          BUNDLE_DIR: ${{ inputs.project_path }}/src-tauri/target/${{ matrix.target }}/release/bundle
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
         run: |
           set -uo pipefail
           case ",$BUNDLES," in *,appimage,*)
