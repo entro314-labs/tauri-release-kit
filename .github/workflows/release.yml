@@ -1278,11 +1278,23 @@ jobs:
               echo "::warning::rpm(1) unavailable — skipping RPM signature check"
             else
               gpg --armor --export "$KEY_ID" > "${RUNNER_TEMP}/RPM-GPG-KEY"
-              sudo rpm --import "${RUNNER_TEMP}/RPM-GPG-KEY" || true
-              if rpm -K "$RPM" | grep -qi 'signatures OK'; then
-                echo "RPM signature verified ($(basename "$RPM"))."
+              # One explicit keyring database for the import and the check. The key
+              # used to go in with `sudo rpm --import` while the check ran as the
+              # runner user, and Debian's rpm keeps a per-user database — so the
+              # check never saw the key and every signed RPM warned "not signed"
+              # (reproduced on ubuntu:24.04: "digests SIGNATURES NOT OK" that way,
+              # "digests signatures OK" this way). Same fix as linux-release-kit.
+              RPMDB="${RUNNER_TEMP}/rpmdb"
+              mkdir -p "$RPMDB"
+              if ! rpmkeys --dbpath "$RPMDB" --import "${RUNNER_TEMP}/RPM-GPG-KEY"; then
+                echo "::warning::Could not import ${KEY_ID} into a scratch rpm keyring — RPM signature not checked"
               else
-                echo "::warning::$(basename "$RPM") is not signed by ${KEY_ID}: $(rpm -K "$RPM" 2>&1 | head -1)"
+                CHECK="$(rpm --dbpath "$RPMDB" -K "$RPM" 2>&1 || true)"
+                if printf '%s' "$CHECK" | grep -qi 'signatures OK'; then
+                  echo "RPM signature verified against ${KEY_ID} ($(basename "$RPM"))."
+                else
+                  echo "::warning::$(basename "$RPM") did not verify against ${KEY_ID}: ${CHECK}"
+                fi
               fi
             fi
           ;; esac
