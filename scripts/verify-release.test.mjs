@@ -465,3 +465,21 @@ test('buildChecks: a product name with a space, stored renamed by GitHub, labell
   })
   assert.deepEqual(bad.filter((r) => !r.ok).map((r) => r.name), ['updater URLs'])
 })
+
+test('cosign: a Sigstore bundle is expected beside each AppImage and SHA256SUMS, and is exempt from the sums', () => {
+  assert.deepEqual(
+    checksumAssets({ product: 'MyApp', version: '1.2.3', cosign: true }),
+    ['SHA256SUMS', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS.sigstore.json'],
+  )
+  const { required } = expectedAssets({
+    version: '1.2.3', channel: 'stable', targets: ['linux-x86_64'],
+    bundles: { macos: [], windows: [], linux: ['appimage'] }, naming, cosign: true,
+  })
+  assert.ok(required.includes('MyApp_1.2.3_amd64.AppImage.sigstore.json'))
+  const text = `${'a'.repeat(64)}  MyApp_1.2.3_amd64.AppImage\n`
+  const assets = [
+    { name: 'MyApp_1.2.3_amd64.AppImage', digest: `sha256:${'a'.repeat(64)}` },
+    { name: 'MyApp_1.2.3_amd64.AppImage.sigstore.json', digest: `sha256:${'b'.repeat(64)}` },
+  ]
+  assert.deepEqual(checkSums(text, assets), [])
+})

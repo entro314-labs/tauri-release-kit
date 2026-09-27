@@ -374,6 +374,26 @@ chmod +x validate-x86_64.AppImage         # from AppImageUpdate releases
 Inspect an embedded signature directly with
 `./MyApp_1.0.0_amd64.AppImage --appimage-signature`.
 
+#### Sigstore bundles (`cosign_sign`)
+
+With `cosign_sign: true` the release also ships a keyless Sigstore bundle for
+`SHA256SUMS` and for each AppImage (`<file>.sigstore.json`), signed by the
+kit's release workflow through GitHub's OIDC identity - no key to manage or
+publish. Verify one with:
+
+```bash
+cosign verify-blob MyApp_1.0.0_amd64.AppImage \
+  --bundle MyApp_1.0.0_amd64.AppImage.sigstore.json \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/<kit owner>/tauri-release-kit/\.github/workflows/release\.yml@'
+```
+
+Verifying `SHA256SUMS` this way and then `sha256sum -c SHA256SUMS` covers
+every other asset. Unlike `actions/attest`, this works from a private app
+repository on any plan - but the signing certificate goes into the public
+Rekor transparency log and names the calling repository and workflow, so
+enable it only if that name may be public.
+
 ### RPM
 
 The pipeline exports `TAURI_SIGNING_RPM_KEY` (the key material, not a key ID)

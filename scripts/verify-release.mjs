@@ -216,13 +216,14 @@ export function installerEntries(target, naming, version) {
  *
  * @param {{ version: string, channel: string, targets: string[],
  *   bundles: { macos: string[], windows: string[], linux: string[] },
- *   naming: ReturnType<typeof appNaming>, extra?: string[] }} input
+ *   naming: ReturnType<typeof appNaming>, extra?: string[], cosign?: boolean }} input
  *   `bundles.windows` is the x86_64 leg's list; the aarch64 leg never builds msi (WiX has
  *   no ARM64 target), exactly as the plan job degrades it. `extra` names assets other jobs
- *   add (checksums, SBOMs).
+ *   add (checksums, SBOMs). `cosign`: the cosign job added a Sigstore bundle
+ *   (`<file>.sigstore.json`) for each AppImage and for SHA256SUMS.
  * @returns {{ required: string[], optional: string[] }}
  */
-export function expectedAssets({ version, channel, targets, bundles, naming, extra = [] }) {
+export function expectedAssets({ version, channel, targets, bundles, naming, extra = [], cosign = false }) {
   const required = [manifestName(channel), ...extra]
   const optional = []
   for (const target of targets) {
@@ -251,7 +252,9 @@ export function expectedAssets({ version, channel, targets, bundles, naming, ext
         optional.push(`${rpm}.sig`)
       }
       if (bundles.linux.includes('appimage')) {
-        required.push(`${p}_${version}_${t.appimage}.AppImage`, `${p}_${version}_${t.appimage}.AppImage.sig`)
+        const appimage = `${p}_${version}_${t.appimage}.AppImage`
+        required.push(appimage, `${appimage}.sig`)
+        if (cosign) required.push(`${appimage}.sigstore.json`)
       }
     }
   }
@@ -374,10 +377,12 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
  * The key id is not handed over by the checksums job: when LINUX_GPG_KEY_ID is a secret the
  * runner drops any job output equal to it, so the public key is identified as the one other
  * `.asc` on the release. None, or more than one, leaves `<KEY_ID>.asc` expected and missing.
- * @param {{ product: string, version: string, signed?: boolean, present?: string[] }} input
+ * With `cosign`, the Sigstore bundle of SHA256SUMS too.
+ * @param {{ product: string, version: string, signed?: boolean, present?: string[], cosign?: boolean }} input
  */
-export function checksumAssets({ product, version, signed = false, present = [] }) {
+export function checksumAssets({ product, version, signed = false, present = [], cosign = false }) {
   const names = ['SHA256SUMS', `${product}_${version}.spdx.json`, `${product}_${version}.cdx.json`]
+  if (cosign) names.push('SHA256SUMS.sigstore.json')
   if (signed) {
     const keys = present.filter((n) => n.endsWith('.asc') && n !== 'SHA256SUMS.asc')
     names.push('SHA256SUMS.asc', keys.length === 1 ? keys[0] : '<KEY_ID>.asc')
@@ -387,7 +392,8 @@ export function checksumAssets({ product, version, signed = false, present = [] 
 
 /**
  * Compares SHA256SUMS (`<hex>  <name>` lines, sha256sum's format) with the release's assets.
- * Every asset except SHA256SUMS and *.asc must have a line, every line must name an asset,
+ * Every asset except SHA256SUMS, *.asc and the *.sigstore.json bundles (made after it) must
+ * have a line, every line must name an asset,
  * and GitHub's digest must equal the listed hash.
  * @param {string} text
  * @param {{ name: string, digest?: string | null }[]} assets
@@ -407,7 +413,9 @@ export function checkSums(text, assets) {
     else if (a.digest && a.digest !== `sha256:${hash}`) bad.push(`${name} (${a.digest} ≠ sha256:${hash})`)
   }
   for (const a of assets) {
-    if (a.name !== 'SHA256SUMS' && !a.name.endsWith('.asc') && !sums.has(a.name)) bad.push(`${a.name} (not in SHA256SUMS)`)
+    if (a.name !== 'SHA256SUMS' && !a.name.endsWith('.asc') && !a.name.endsWith('.sigstore.json') && !sums.has(a.name)) {
+      bad.push(`${a.name} (not in SHA256SUMS)`)
+    }
   }
   return bad
 }
@@ -485,7 +493,7 @@ export function renderSummary({ tag, releaseUrl, assetCount, platformCount, chec
  * Entry point for actions/github-script. Reads its inputs from the environment:
  * RELEASE_ID, REL_OWNER, REL_NAME, TAG, CHANNEL, TARGETS, MACOS_BUNDLES, WINDOWS_BUNDLES,
  * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout), SUMS_SIGNED ('true' when the
- * checksums job signed SHA256SUMS).
+ * checksums job signed SHA256SUMS), COSIGN_SIGNED ('true' when the cosign job ran).
  */
 export async function run({ github, core, env, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const owner = env.REL_OWNER
@@ -496,13 +504,15 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
   const channel = env.CHANNEL
   const targets = csv(env.TARGETS)
   const naming = loadAppNaming(env.SRC_TAURI)
+  const cosign = env.COSIGN_SIGNED === 'true'
   const expectedFor = (present) => expectedAssets({
     version,
     channel,
     targets,
     bundles: { macos: csv(env.MACOS_BUNDLES), windows: csv(env.WINDOWS_BUNDLES), linux: csv(env.LINUX_BUNDLES) },
     naming,
-    extra: checksumAssets({ product: naming.product, version, signed: env.SUMS_SIGNED === 'true', present }),
+    extra: checksumAssets({ product: naming.product, version, signed: env.SUMS_SIGNED === 'true', present, cosign }),
+    cosign,
   })
   // URLs are built from the tag path, never a draft's browser_download_url (docs/GOTCHAS.md).
   const downloadBase = `https://github.com/${owner}/${repo}/releases/download/${tag}/`

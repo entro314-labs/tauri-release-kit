@@ -119,6 +119,19 @@ on:
         required: false
         type: string
         default: 'ubuntu-24.04-arm'
+      cosign_sign:
+        description: >-
+          Sign SHA256SUMS and every AppImage with keyless Sigstore (cosign)
+          and ship each bundle as <file>.sigstore.json, verifiable with
+          `cosign verify-blob --bundle <file>.sigstore.json <file>` against
+          this workflow's identity (docs/SIGNING.md). Works from a private
+          repository - unlike actions/attest there - but the signing
+          certificate is logged in the public Rekor transparency log and
+          names the calling repository and workflow: turn it on only if that
+          name may be public.
+        required: false
+        type: boolean
+        default: false
       glibc_max:
         description: >-
           Highest glibc version (e.g. '2.35') the Linux binaries may require.
@@ -1905,7 +1918,7 @@ jobs:
           gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets?per_page=100" \
             --jq '.[] | [.id, .name] | @tsv' > "${RUNNER_TEMP}/assets.tsv"
           while IFS=$'\t' read -r id name; do
-            case "$name" in SHA256SUMS|*.asc|*.spdx.json|*.cdx.json) continue ;; esac
+            case "$name" in SHA256SUMS|*.asc|*.spdx.json|*.cdx.json|*.sigstore.json) continue ;; esac
             gh api -H 'Accept: application/octet-stream' "repos/${REPO}/releases/assets/${id}" > "$name"
           done < "${RUNNER_TEMP}/assets.tsv"
           cp "${RUNNER_TEMP}"/sbom/* .
@@ -1993,6 +2006,63 @@ jobs:
             echo "::warning::Artifact attestation failed on public ${GITHUB_REPOSITORY} (see the step above). The release continues without provenance."
           fi
 
+  # Opt-in (cosign_sign): keyless Sigstore bundles for SHA256SUMS (which covers every other asset)
+  # and for each AppImage, the one Linux format with no signature of its own a user's tools check.
+  # Runs after checksums so the bundles are not in the sums; verify-release expects them.
+  cosign:
+    needs: [check-changelog, create-release, checksums]
+    if: inputs.cosign_sign && needs.checksums.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: write        # reads and uploads to the draft (same-repo mode)
+      id-token: write        # the OIDC token Fulcio issues the signing certificate for
+    steps:
+      # releases_repo token via the GitHub App (see create-release).
+      - name: Mint releases-repo token (GitHub App)
+        id: app_token
+        if: inputs.app_client_id != '' && inputs.releases_repo != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app_client_id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repositories: ${{ needs.check-changelog.outputs.releases_name }}
+          permission-contents: write
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign SHA256SUMS and the AppImages, upload the bundles
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ needs.check-changelog.outputs.version }}
+          KIT: ${{ job.workflow_repository }}
+          KIT_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/cosign"
+          mkdir -p "$WORK" && cd "$WORK"
+          gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | select(.name == "SHA256SUMS" or (.name | endswith(".AppImage"))) | [.id, .name] | @tsv' \
+            > "${RUNNER_TEMP}/cosign-assets.tsv"
+          grep -q $'\tSHA256SUMS$' "${RUNNER_TEMP}/cosign-assets.tsv" \
+            || { echo "::error::SHA256SUMS is not on the draft"; exit 1; }
+          BUNDLES=()
+          while IFS=$'\t' read -r id name; do
+            gh api -H 'Accept: application/octet-stream' "repos/${REPO}/releases/assets/${id}" > "$name"
+            cosign sign-blob --yes --bundle "${name}.sigstore.json" "$name"
+            BUNDLES+=("${name}.sigstore.json")
+          done < "${RUNNER_TEMP}/cosign-assets.tsv"
+          gh release upload "$TAG" "${BUNDLES[@]}" --repo "$REPO" --clobber
+          # A reusable workflow signs as itself: the certificate names the kit's workflow file.
+          echo "::notice::Signed ${#BUNDLES[@]} files with Sigstore as ${GITHUB_SERVER_URL}/${KIT}/.github/workflows/release.yml@${KIT_SHA} - verify with docs/SIGNING.md, \"Sigstore bundles\"."
+
   verify-release:
     # Fail loud BEFORE the draft flips public. The checks live in the kit's
     # scripts/verify-release.mjs (unit-tested, see its header for the list):
@@ -2001,7 +2071,7 @@ jobs:
     # GitHub sha256 digest, and the updater manifest must cover exactly the
     # shipped platforms with URLs on the serving repo's tag path and signatures
     # byte-identical to the uploaded .sig files, made by the app's own pubkey.
-    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json, checksums]
+    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json, checksums, cosign]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
@@ -2009,7 +2079,7 @@ jobs:
     # the REST API lists drafts only to tokens with push access.
     permissions:
       contents: write
-    if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.checksums.result == 'success'
+    if: ${{ !cancelled() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.checksums.result == 'success' && (needs.cosign.result == 'success' || needs.cosign.result == 'skipped') }}
     steps:
       # The app's tauri.conf.json + per-OS overlays name the assets
       # (productName, rpm release, WiX languages) and carry the updater pubkey.
@@ -2068,6 +2138,7 @@ jobs:
           LINUX_BUNDLES: ${{ needs.plan.outputs.linux_bundles }}
           SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
           SUMS_SIGNED: ${{ needs.checksums.outputs.signed }}
+          COSIGN_SIGNED: ${{ needs.cosign.result == 'success' }}
         with:
           github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
