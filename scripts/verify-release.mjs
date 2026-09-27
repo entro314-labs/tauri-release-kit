@@ -370,11 +370,18 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
 /**
  * The release-wide files the checksums job adds: SHA256SUMS, the two SBOMs, and — when the
  * Linux GPG key is configured — SHA256SUMS.asc plus the public key as <KEY_ID>.asc.
- * @param {{ product: string, version: string, signingKeyId?: string }} input
+ *
+ * The key id is not handed over by the checksums job: when LINUX_GPG_KEY_ID is a secret the
+ * runner drops any job output equal to it, so the public key is identified as the one other
+ * `.asc` on the release. None, or more than one, leaves `<KEY_ID>.asc` expected and missing.
+ * @param {{ product: string, version: string, signed?: boolean, present?: string[] }} input
  */
-export function checksumAssets({ product, version, signingKeyId }) {
+export function checksumAssets({ product, version, signed = false, present = [] }) {
   const names = ['SHA256SUMS', `${product}_${version}.spdx.json`, `${product}_${version}.cdx.json`]
-  if (signingKeyId) names.push('SHA256SUMS.asc', `${signingKeyId}.asc`)
+  if (signed) {
+    const keys = present.filter((n) => n.endsWith('.asc') && n !== 'SHA256SUMS.asc')
+    names.push('SHA256SUMS.asc', keys.length === 1 ? keys[0] : '<KEY_ID>.asc')
+  }
   return names
 }
 
@@ -477,8 +484,8 @@ export function renderSummary({ tag, releaseUrl, assetCount, platformCount, chec
 /**
  * Entry point for actions/github-script. Reads its inputs from the environment:
  * RELEASE_ID, REL_OWNER, REL_NAME, TAG, CHANNEL, TARGETS, MACOS_BUNDLES, WINDOWS_BUNDLES,
- * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout), SUMS_KEY_ID (the key that signed
- * SHA256SUMS; empty when unsigned).
+ * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout), SUMS_SIGNED ('true' when the
+ * checksums job signed SHA256SUMS).
  */
 export async function run({ github, core, env, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const owner = env.REL_OWNER
@@ -489,13 +496,13 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
   const channel = env.CHANNEL
   const targets = csv(env.TARGETS)
   const naming = loadAppNaming(env.SRC_TAURI)
-  const expected = expectedAssets({
+  const expectedFor = (present) => expectedAssets({
     version,
     channel,
     targets,
     bundles: { macos: csv(env.MACOS_BUNDLES), windows: csv(env.WINDOWS_BUNDLES), linux: csv(env.LINUX_BUNDLES) },
     naming,
-    extra: checksumAssets({ product: naming.product, version, signingKeyId: env.SUMS_KEY_ID || undefined }),
+    extra: checksumAssets({ product: naming.product, version, signed: env.SUMS_SIGNED === 'true', present }),
   })
   // URLs are built from the tag path, never a draft's browser_download_url (docs/GOTCHAS.md).
   const downloadBase = `https://github.com/${owner}/${repo}/releases/download/${tag}/`
@@ -524,6 +531,7 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
         manifestError = `${manifestName(channel)} is not valid JSON: ${error.message}`
       }
     }
+    const expected = expectedFor(release.assets.map(uploadName))
     const checks = buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums })
     return { release, manifest, checks }
   }

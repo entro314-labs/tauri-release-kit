@@ -1702,7 +1702,9 @@ jobs:
       contents: write
     if: needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success'
     outputs:
-      key_id: ${{ steps.sign.outputs.key_id }}
+      # Not the key id: when LINUX_GPG_KEY_ID is a secret the runner drops an output
+      # equal to it, and verify-release would expect no signature at all.
+      signed: ${{ steps.sign.outputs.key_id != '' }}
     steps:
       # The SBOM describes the tagged source, the same ref the legs built.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1977,7 +1979,7 @@ jobs:
           WINDOWS_BUNDLES: ${{ needs.plan.outputs.windows_bundles }}
           LINUX_BUNDLES: ${{ needs.plan.outputs.linux_bundles }}
           SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
-          SUMS_KEY_ID: ${{ needs.checksums.outputs.key_id }}
+          SUMS_SIGNED: ${{ needs.checksums.outputs.signed }}
         with:
           github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |

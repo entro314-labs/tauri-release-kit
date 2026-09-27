@@ -339,7 +339,7 @@ function runFixture() {
   const contents = new Map([[0, JSON.stringify(goodManifest(targets))], [2, SIG], [5, sumsFor(names)]])
   const env = {
     RELEASE_ID: '7', REL_OWNER: 'org', REL_NAME: 'myapp-releases', TAG: 'v1.2.3', CHANNEL: 'stable',
-    TARGETS: 'linux-x86_64', MACOS_BUNDLES: '', WINDOWS_BUNDLES: '', LINUX_BUNDLES: 'appimage', SRC_TAURI: dir, SUMS_KEY_ID: '',
+    TARGETS: 'linux-x86_64', MACOS_BUNDLES: '', WINDOWS_BUNDLES: '', LINUX_BUNDLES: 'appimage', SRC_TAURI: dir, SUMS_SIGNED: 'false',
   }
   return { names, contents, env }
 }
@@ -369,7 +369,25 @@ test('run: re-reads eight times, then fails with every broken check in the summa
 
 test('checksumAssets adds the signature and public key only when signed', () => {
   assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3' }), ['SHA256SUMS', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json'])
-  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signingKeyId: 'ABCD' }).slice(3), ['SHA256SUMS.asc', 'ABCD.asc'])
+  const present = ['SHA256SUMS', 'SHA256SUMS.asc', 'ABCD.asc', 'MyApp_1.2.3_amd64.AppImage']
+  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(3), ['SHA256SUMS.asc', 'ABCD.asc'])
+})
+
+test('checksumAssets: a signed release needs exactly one public key beside SHA256SUMS.asc', () => {
+  for (const present of [['SHA256SUMS.asc'], ['SHA256SUMS.asc', 'A.asc', 'B.asc']]) {
+    assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(3), ['SHA256SUMS.asc', '<KEY_ID>.asc'])
+  }
+})
+
+test('run: a signed release verifies without being told the key id', async () => {
+  // LINUX_GPG_KEY_ID as a secret makes the runner drop a key_id job output, so verify must
+  // not depend on one: an empty id used to leave both .asc files unexpected.
+  const { names, contents, env } = runFixture()
+  const signed = [...names, 'SHA256SUMS.asc', '0123456789ABCDEF.asc']
+  const github = fakeGithub(() => releaseFor(signed), contents)
+  const { core, out } = fakeCore()
+  await run({ github, core, env: { ...env, SUMS_SIGNED: 'true' }, sleep: async () => {} })
+  assert.equal(out.failed, null, out.failed)
 })
 
 test('checkSums: unlisted asset, listed-but-absent file, digest drift; .asc and SUMS exempt', () => {
