@@ -205,14 +205,13 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    existing draft release for the tag, so retry via dispatch with only the
    failed legs (assets from successful legs are already on the draft):
    ```bash
-   # fix on main, push, then:
    gh workflow run release.yml -f tag=v0.2.0-alpha.1 -f build_targets=windows-aarch64
    ```
-   The dispatch run builds from the branch HEAD (which has your fix) while
-   the manifest + verification still cover the full platform set. Caveats:
-   - The app-repo tag keeps pointing at the pre-fix commit. Usually fine
-     (release provenance lives on the releases repo, whose tag is created at
-     publish); recycle the tag the old way if you want exact provenance.
+   Every checkout in the dispatch run is the tag, not the branch, while the
+   manifest + verification still cover the full platform set. Caveats:
+   - A retry recovers an infrastructure failure (a runner, the network, a
+     missing secret). A failure in the app's own code (clippy, the linkage
+     check, a smoke test) fails again on retry — the fix needs a new version.
    - A release already PUBLISHED for the tag is never reused — the run fails
      loudly; bump the version instead.
    - Retrying a leg that failed AFTER uploading its assets is safe:
@@ -334,9 +333,12 @@ Every job that writes cross-repo then mints its own installation token with
 `actions/create-github-app-token`, scoped to exactly the one repo it writes
 (`owner` + `repositories`) with `contents: write` — tokens cannot be handed
 between jobs, so each job mints. With `app_client_id` set the App is used for
-every cross-repo target, so it must be installed on all of them;
-`check-changelog` mints once up front, so a missing installation fails in
-seconds. Cask commits are authored as the App's bot account.
+every cross-repo target, so it must be installed on all of them.
+`check-changelog` mints once up front for `releases_repo`, so a missing
+installation there fails in seconds; one missing on the Homebrew tap or the
+Scoop bucket only fails that job, after the release is public (the
+companion channels still run — they are gated on `published`). Cask commits
+are authored as the App's bot account.
 
 Why it is the default: an App's key does not expire on a calendar, while a
 fine-grained PAT does (a vanished `RELEASES_TOKEN` has cost a real release at

@@ -116,7 +116,7 @@ on:
         description: >-
           tauri.conf.json productName — the filename stem of bundled assets
           (<product>_<version>_aarch64.dmg) and the .app bundle name. Required
-          for Homebrew cask publishing; unused otherwise.
+          for Homebrew cask and Scoop publishing; unused otherwise.
         required: false
         type: string
         default: ''
@@ -258,6 +258,9 @@ on:
           version (stable releases only). Set false when a local release
           driver (e.g. release-kit) writes the version BEFORE tagging —
           otherwise two writers race on the same version files every release.
+          Opening the PR needs the app repo's "Allow GitHub Actions to create
+          and approve pull requests" setting; without it the branch is pushed
+          and the job fails.
         required: false
         type: boolean
         default: true
