@@ -508,6 +508,19 @@ The job's summary page shows a pass/fail table either way. `publish-release`
 re-reads the release immediately before flipping it and refuses if it is no
 longer a draft, then summarises the publish and the anonymous URL checks.
 
+When legs are missing, the failure ends with the repair: the `build_targets`
+to re-dispatch the release with, so only those legs rebuild into the same
+draft. The same checks run from a terminal against any release, draft or
+published:
+
+```bash
+GH_TOKEN=... node scripts/verify-release.mjs release \
+  --repo my-org/myapp-releases --tag v1.2.3 --src-tauri path/to/src-tauri \
+  --targets darwin-aarch64,windows-x86_64,linux-x86_64 \
+  --macos-bundles app,dmg --windows-bundles nsis --linux-bundles deb,rpm,appimage \
+  [--signed] [--cosign]
+```
+
 ## Cost notes
 
 macOS runners bill at 10× on private repos and dominate release cost. Four

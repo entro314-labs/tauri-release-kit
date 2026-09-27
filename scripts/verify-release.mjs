@@ -262,6 +262,24 @@ export function expectedAssets({ version, channel, targets, bundles, naming, ext
 }
 
 /**
+ * The legs to rebuild so the release has every missing asset: each target whose own installers,
+ * updater archives or signatures are among `missing`. Release-wide files (SHA256SUMS, SBOMs,
+ * the manifest) are rewritten by every run and name no leg.
+ * @param {{ missing: string[], version: string, channel: string, targets: string[],
+ *   bundles: { macos: string[], windows: string[], linux: string[] }, naming: ReturnType<typeof appNaming>,
+ *   cosign?: boolean }} input
+ * @returns {string[]} the `build_targets` for a retry dispatch
+ */
+export function repairPlan({ missing, version, channel, targets, bundles, naming, cosign = false }) {
+  const gone = new Set(missing)
+  return targets.filter((target) => {
+    const own = expectedAssets({ version, channel, targets: [target], bundles, naming, cosign }).required
+      .filter((name) => name !== manifestName(channel))
+    return own.some((name) => gone.has(name))
+  })
+}
+
+/**
  * @param {string[]} present asset names on the release
  * @param {{ required: string[], optional: string[] }} expected
  */
@@ -428,12 +446,13 @@ export function checkSums(text, assets) {
  *   `sums` is SHA256SUMS' content, null when it is not on the release.
  * @returns {{ name: string, ok: boolean, detail: string }[]}
  */
-export function buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums }) {
+export function buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums, allowPublished = false }) {
   const rows = []
   const row = (name, bad, what) => rows.push({ name, ok: bad.length === 0, detail: bad.length ? `${what}: ${list(bad)}` : 'ok' })
   const wantPrerelease = channel !== 'stable'
 
-  row('still a draft', release.draft === true ? [] : ['the release is no longer a draft'], 'state')
+  // The pipeline verifies its draft; the `release` CLI may check one that is already out.
+  if (!allowPublished) row('still a draft', release.draft === true ? [] : ['the release is no longer a draft'], 'state')
   row('prerelease flag matches channel', release.prerelease === wantPrerelease ? [] : [`prerelease=${release.prerelease} on channel ${channel}`], 'state')
   const { missing, unexpected } = compareAssets(release.assets.map(uploadName), expected)
   row('expected assets present', missing, 'missing')
@@ -542,7 +561,7 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
       }
     }
     const expected = expectedFor(release.assets.map(uploadName))
-    const checks = buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums })
+    const checks = buildChecks({ release, channel, version, expected, manifest, manifestError, targets, downloadBase, naming, sigFiles, sums, allowPublished: env.ALLOW_PUBLISHED === 'true' })
     return { release, manifest, checks }
   }
 
@@ -574,10 +593,94 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
 
   const failed = checks.filter((c) => !c.ok)
   if (failed.length) {
-    core.setFailed(`Release ${tag} on ${owner}/${repo} failed verification:\n  - ${failed.map((c) => `${c.name}: ${c.detail}`).join('\n  - ')}\nPresent: ${release.assets.map((a) => a.name).join(', ')}`)
+    const { missing } = compareAssets(release.assets.map(uploadName), expectedFor(release.assets.map(uploadName)))
+    const legs = repairPlan({
+      missing, version, channel, targets, naming, cosign,
+      bundles: { macos: csv(env.MACOS_BUNDLES), windows: csv(env.WINDOWS_BUNDLES), linux: csv(env.LINUX_BUNDLES) },
+    })
+    const repair = legs.length
+      ? `\nRepair: re-dispatch the release for ${tag} with build_targets=${legs.join(',')} - the draft is reused and only those legs rebuild.`
+      : ''
+    core.setFailed(`Release ${tag} on ${owner}/${repo} failed verification:\n  - ${failed.map((c) => `${c.name}: ${c.detail}`).join('\n  - ')}\nPresent: ${release.assets.map((a) => a.name).join(', ')}${repair}`)
     return
   }
   core.info(`Verified ${release.assets.length} assets and ${targets.length} updater platforms on ${owner}/${repo} ${tag}.`)
+}
+
+/**
+ * `release` CLI: run the same verification against a release (draft or published) from a
+ * terminal, with GH_TOKEN (or GITHUB_TOKEN), and print the repair plan when legs are missing.
+ * @param {string[]} args
+ * @returns {Promise<number>} the exit code
+ */
+async function verifyReleaseCli(args) {
+  const flag = (name) => {
+    const i = args.indexOf(`--${name}`)
+    return i === -1 ? undefined : args[i + 1]
+  }
+  const [owner, repo] = (flag('repo') ?? '').split('/')
+  const tag = flag('tag')
+  const srcTauri = flag('src-tauri')
+  const targets = flag('targets')
+  if (!owner || !repo || !tag || !srcTauri || !targets) {
+    console.error('release: --repo, --tag, --src-tauri and --targets are required')
+    return 2
+  }
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  const api = async (path, accept = 'application/vnd.github+json') => {
+    const response = await fetch(`https://api.github.com${path}`, {
+      headers: { accept, ...(token ? { authorization: `Bearer ${token}` } : {}), 'user-agent': 'tauri-release-kit' },
+    })
+    if (!response.ok) throw new Error(`GET ${path}: HTTP ${response.status}`)
+    return accept === 'application/octet-stream' ? await response.arrayBuffer() : await response.json()
+  }
+  // Drafts are not reachable by tag; scan the list.
+  const releases = await api(`/repos/${owner}/${repo}/releases?per_page=100`)
+  const found = releases.find((r) => r.tag_name === tag)
+  if (!found) {
+    console.error(`release: no release for ${tag} on ${owner}/${repo}`)
+    return 1
+  }
+  const version = tag.replace(/^v/, '')
+  const channel = /-alpha/.test(version) ? 'alpha' : /-beta/.test(version) ? 'beta' : 'stable'
+  const github = {
+    rest: {
+      repos: {
+        getRelease: async ({ release_id }) => ({ data: await api(`/repos/${owner}/${repo}/releases/${release_id}`) }),
+        getReleaseAsset: async ({ asset_id }) => ({
+          data: await api(`/repos/${owner}/${repo}/releases/assets/${asset_id}`, 'application/octet-stream'),
+        }),
+      },
+    },
+  }
+  let failure = null
+  const summary = []
+  const core = {
+    info: (text) => console.log(text),
+    setOutput: () => {},
+    setFailed: (text) => {
+      failure = text
+    },
+    summary: { addRaw(text) { summary.push(text); return this }, async write() {} },
+  }
+  await run({
+    github,
+    core,
+    sleep: async () => {},
+    env: {
+      RELEASE_ID: String(found.id), REL_OWNER: owner, REL_NAME: repo, TAG: tag, CHANNEL: channel,
+      TARGETS: targets, MACOS_BUNDLES: flag('macos-bundles') ?? '', WINDOWS_BUNDLES: flag('windows-bundles') ?? '',
+      LINUX_BUNDLES: flag('linux-bundles') ?? '', SRC_TAURI: srcTauri,
+      SUMS_SIGNED: String(args.includes('--signed')), COSIGN_SIGNED: String(args.includes('--cosign')),
+      ALLOW_PUBLISHED: 'true',
+    },
+  })
+  console.log(summary.join('\n'))
+  if (failure) {
+    console.error(failure)
+    return 1
+  }
+  return 0
 }
 
 // CLI, for workflow steps that need the same logic outside github-script:
@@ -605,8 +708,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       console.log(`signed with key ${got}; plugins.updater.pubkey is key ${want}`)
       process.exitCode = got === want ? 0 : 1
     }
+  } else if (command === 'release') {
+    process.exitCode = await verifyReleaseCli(args)
   } else {
-    console.error('usage: node verify-release.mjs product <src-tauri dir> | updater-key <.sig file> <src-tauri dir>')
+    console.error([
+      'usage: node verify-release.mjs product <src-tauri dir>',
+      '       node verify-release.mjs updater-key <.sig file> <src-tauri dir>',
+      '       node verify-release.mjs release --repo <owner/name> --tag <vX.Y.Z> --src-tauri <dir> --targets <keys>',
+      '         [--macos-bundles app,dmg] [--windows-bundles nsis] [--linux-bundles deb,rpm,appimage] [--signed] [--cosign]',
+    ].join('\n'))
     process.exitCode = 2
   }
 }

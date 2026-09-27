@@ -13,6 +13,7 @@ import {
   checkManifest,
   checkSums,
   checksumAssets,
+  repairPlan,
   compareAssets,
   expectedAssets,
   installerEntries,
@@ -482,4 +483,15 @@ test('cosign: a Sigstore bundle is expected beside each AppImage and SHA256SUMS,
     { name: 'MyApp_1.2.3_amd64.AppImage.sigstore.json', digest: `sha256:${'b'.repeat(64)}` },
   ]
   assert.deepEqual(checkSums(text, assets), [])
+})
+
+test('repairPlan: the legs whose own assets are missing, never for release-wide files', () => {
+  const bundles = { macos: ['app', 'dmg'], windows: ['nsis'], linux: ['appimage'] }
+  const targets = ['darwin-aarch64', 'windows-x86_64', 'linux-x86_64']
+  const missing = ['MyApp_1.2.3_aarch64.dmg', 'MyApp_1.2.3_amd64.AppImage.sig', 'SHA256SUMS', 'latest.json']
+  assert.deepEqual(
+    repairPlan({ missing, version: '1.2.3', channel: 'stable', targets, bundles, naming }),
+    ['darwin-aarch64', 'linux-x86_64'],
+  )
+  assert.deepEqual(repairPlan({ missing: ['SHA256SUMS'], version: '1.2.3', channel: 'stable', targets, bundles, naming }), [])
 })
