@@ -446,6 +446,10 @@ jobs:
       contents: read   # checkout only
     outputs:
       version: ${{ steps.resolved.outputs.VERSION }}
+      # The commit the tag points to, resolved once: every later checkout builds exactly this
+      # commit, so a tag moved (or force-pushed) while the release runs can't mix two commits'
+      # assets in one release.
+      sha: ${{ steps.resolved.outputs.SHA }}
       # 'owner name' pair resolved once; jobs re-split it (expressions have no split()).
       releases_owner: ${{ steps.relrepo.outputs.OWNER }}
       releases_name: ${{ steps.relrepo.outputs.NAME }}
@@ -475,8 +479,11 @@ jobs:
             echo "::error::Version '$VERSION' is not a valid release tag (expected vX.Y.Z, vX.Y.Z-alpha.N or vX.Y.Z-beta.N — alpha and beta are the only channels)"
             exit 1
           fi
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "BARE=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          {
+            echo "VERSION=$VERSION"
+            echo "BARE=${VERSION#v}"
+            echo "SHA=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Resolve releases repo
         id: relrepo
@@ -762,9 +769,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # A dispatch retry names the tag; without this it would build whatever the
-          # default branch is at retry time and attach that beside the tag's assets.
-          ref: ${{ inputs.tag || github.ref }}
+          # The tag's commit as check-changelog resolved it (a dispatch retry names the tag;
+          # without a ref it would build whatever the default branch is at retry time).
+          ref: ${{ needs.check-changelog.outputs.sha }}
 
       # The release body IS the tag's CHANGELOG section: it becomes the notes
       # users see on the release page AND — via create-updater-json's `notes`
@@ -838,7 +845,16 @@ jobs:
             const releases = await github.paginate(github.rest.repos.listReleases, {
               owner: REL_OWNER, repo: REL_NAME, per_page: 100,
             });
-            const existing = releases.find((r) => r.tag_name === VERSION);
+            // A draft whose tag was never created (or was deleted) shows up as `untagged-<hash>`;
+            // re-tag that draft rather than open a duplicate beside it.
+            const existing =
+              releases.find((r) => r.tag_name === VERSION) ??
+              releases.find(
+                (r) =>
+                  r.draft &&
+                  r.tag_name.startsWith('untagged-') &&
+                  r.name === `${APP_NAME} ${VERSION}`,
+              );
             if (existing && !existing.draft) {
               core.setFailed(`A published release for ${VERSION} already exists on ${REL_OWNER}/${REL_NAME} — bump the version (or delete that release) instead of re-releasing the tag.`);
               return;
@@ -882,9 +898,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # A dispatch retry names the tag; without this it would build whatever the
-          # default branch is at retry time and attach that beside the tag's assets.
-          ref: ${{ inputs.tag || github.ref }}
+          # The tag's commit as check-changelog resolved it (a dispatch retry names the tag;
+          # without a ref it would build whatever the default branch is at retry time).
+          ref: ${{ needs.check-changelog.outputs.sha }}
 
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -1559,7 +1575,7 @@ jobs:
     # Reads the draft's assets and uploads the manifest to it.
     permissions:
       contents: write
-    if: always() && needs.build-and-release.result == 'success'
+    if: ${{ !cancelled() && needs.build-and-release.result == 'success' }}
     steps:
       # releases_repo token via the GitHub App (see create-release).
       - name: Mint releases-repo token (GitHub App)
@@ -1720,7 +1736,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.check-changelog.outputs.sha }}
           path: app
 
       - name: Check out the kit's scripts
@@ -1941,7 +1957,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.check-changelog.outputs.sha }}
           path: app
 
       # The verification script, from the kit commit the caller pinned — not
@@ -2003,7 +2019,7 @@ jobs:
       # The script writes the full table itself; this only covers a run that
       # died before it could (checkout failure, script crash).
       - name: Summary (verification did not complete)
-        if: always() && steps.verify.outputs.summary_written != 'true'
+        if: ${{ !cancelled() && steps.verify.outputs.summary_written != 'true' }}
         env:
           TAG: ${{ needs.create-release.outputs.version }}
           OUTCOME: ${{ steps.verify.outcome }}
@@ -2026,7 +2042,7 @@ jobs:
       published: ${{ steps.publish.outcome == 'success' }}
     # attest never fails the release on its own (continue-on-error on the
     # attest step); it still has to have run, so provenance precedes publish.
-    if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success' && needs.attest.result == 'success'
+    if: ${{ !cancelled() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success' && needs.attest.result == 'success' }}
     steps:
       # releases_repo token via the GitHub App (see create-release).
       - name: Mint releases-repo token (GitHub App)
@@ -2229,7 +2245,7 @@ jobs:
             console.log(`Mirrored ${manifestName} to ${rollingTag}/latest.json`);
 
       - name: Summary
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           VERSION: ${{ needs.create-release.outputs.version }}
           CHANNEL: ${{ needs.create-release.outputs.channel }}
@@ -2265,7 +2281,7 @@ jobs:
     # reads the published release's asset list.
     permissions:
       contents: read
-    if: always() && needs.publish-release.result == 'success' && inputs.homebrew_tap != ''
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' && inputs.homebrew_tap != '' }}
     steps:
       - name: Resolve tap
         id: tap
@@ -2516,7 +2532,7 @@ jobs:
     # The action reads the published release with github.token.
     permissions:
       contents: read
-    if: always() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.winget_identifier != ''
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.winget_identifier != '' }}
     steps:
       - name: Check winget prerequisites
         id: prereq
@@ -2592,7 +2608,7 @@ jobs:
     environment: ${{ inputs.environment }}
     # Pushes with SCOOP_TAP_TOKEN or the GitHub App; no GITHUB_TOKEN use.
     permissions: {}
-    if: always() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.scoop_bucket != ''
+    if: ${{ !cancelled() && needs.publish-release.result == 'success' && needs.create-release.outputs.channel == 'stable' && inputs.scoop_bucket != '' }}
     steps:
       - name: Resolve bucket
         id: bucket
