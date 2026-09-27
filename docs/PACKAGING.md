@@ -241,10 +241,12 @@ as:
 /usr/lib/libc.so.6: version 'GLIBC_2.33' not found
 ```
 
-This kit builds Linux legs on `ubuntu-24.04` images, which means a glibc 2.39
-floor. If you need to support older distributions, that is the number to
-change — and a Docker-based build on 22.04 is the way to change it, not a
-config option.
+This kit builds Linux legs on `ubuntu-24.04` images by default, which means a
+glibc 2.39 floor. To support older distributions, point `linux_x64_runner` /
+`linux_arm_runner` at `ubuntu-22.04` / `ubuntu-22.04-arm` (glibc 2.35, still
+WebKitGTK 4.1). Every Linux leg reports the glibc its binaries need in the run
+summary; set `glibc_max` (e.g. `'2.35'`) to make a leg that needs more fail
+before the release is published.
 
 Related: GUI apps on Linux and macOS do not inherit `$PATH` from your shell
 dotfiles. If your app shells out to anything, use Tauri's

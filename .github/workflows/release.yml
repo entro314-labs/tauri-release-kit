@@ -102,6 +102,32 @@ on:
         required: false
         type: string
         default: 'macos-15-intel'
+      linux_x64_runner:
+        description: >-
+          Runner for the linux-x86_64 leg. The binary requires the glibc of the
+          image it was built on (docs/PACKAGING.md, "The glibc rule"):
+          'ubuntu-24.04' (default) means glibc 2.39, 'ubuntu-22.04' 2.35 -
+          choose the oldest image that still has WebKitGTK 4.1 to reach older
+          distributions.
+        required: false
+        type: string
+        default: 'ubuntu-24.04'
+      linux_arm_runner:
+        description: >-
+          Runner for the linux-aarch64 leg; see linux_x64_runner
+          ('ubuntu-24.04-arm' default, 'ubuntu-22.04-arm' for glibc 2.35).
+        required: false
+        type: string
+        default: 'ubuntu-24.04-arm'
+      glibc_max:
+        description: >-
+          Highest glibc version (e.g. '2.35') the Linux binaries may require.
+          Every Linux leg reports the glibc its binaries need in the run
+          summary; with this set, a leg that needs more fails, so the release
+          is never published. Empty = report only.
+        required: false
+        type: string
+        default: ''
       releases_repo:
         description: >-
           'owner/name' of the repo that hosts the GitHub releases (and the
@@ -627,6 +653,8 @@ jobs:
       LINUX_BUNDLES: ${{ inputs.linux_bundles }}
       MACOS_ARM_RUNNER: ${{ inputs.macos_arm_runner }}
       MACOS_INTEL_RUNNER: ${{ inputs.macos_intel_runner }}
+      LINUX_X64_RUNNER: ${{ inputs.linux_x64_runner }}
+      LINUX_ARM_RUNNER: ${{ inputs.linux_arm_runner }}
       VERSION: ${{ needs.check-changelog.outputs.version }}
     steps:
       - name: Compute build matrix
@@ -656,9 +684,12 @@ jobs:
           # legs stay GitHub-hosted: Linux/Windows minutes are cheap, and
           # windows-11-arm has no self-hosted equivalent anyway.
           LEGS=$(printf '%s' "$LEGS" | jq -c \
-            --arg arm "$MACOS_ARM_RUNNER" --arg intel "$MACOS_INTEL_RUNNER" '
+            --arg arm "$MACOS_ARM_RUNNER" --arg intel "$MACOS_INTEL_RUNNER" \
+            --arg lx "$LINUX_X64_RUNNER" --arg la "$LINUX_ARM_RUNNER" '
             .["darwin-aarch64"].platform = $arm |
-            .["darwin-x86_64"].platform  = $intel')
+            .["darwin-x86_64"].platform  = $intel |
+            .["linux-x86_64"].platform   = $lx |
+            .["linux-aarch64"].platform  = $la')
           norm() { printf '%s' "$1" | tr -d '[:space:]' | tr ',' '\n' | sed '/^$/d' | awk '!seen[$0]++'; }
           TARGET_LIST=$(norm "$TARGETS")
           [ -n "$TARGET_LIST" ] || { echo "::error::targets input resolved to an empty set"; exit 1; }
@@ -941,7 +972,8 @@ jobs:
       # build died at glib-sys/pkg-config ten minutes later. A release must
       # fail loudly at the install step; the caching saved ~40s.
       # libfuse2t64: linuxdeploy is itself an AppImage and needs FUSE2 to run;
-      # the ubuntu-24.04 images (20260714+) no longer ship it.
+      # the ubuntu-24.04 images (20260714+) no longer ship it. ubuntu-22.04
+      # (linux_*_runner) names the same library libfuse2.
       # rpm: only needed to VERIFY the bundled .rpm's signature below —
       # tauri-bundler writes RPMs itself, no rpmbuild involved.
       - name: Install Linux dependencies
@@ -960,7 +992,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             xdg-utils \
-            libfuse2t64 \
+            "$(apt-cache show libfuse2t64 >/dev/null 2>&1 && echo libfuse2t64 || echo libfuse2)" \
             rpm
 
       # Bundling three Linux formats writes the payload three times on top of
@@ -1442,6 +1474,33 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+
+      # A Linux binary needs the glibc of the image it was built on, and a too
+      # new one fails on users' machines at startup ("version 'GLIBC_2.39'
+      # not found"). Report what each leg's binaries need; glibc_max turns the
+      # report into a gate.
+      - name: Check the glibc floor
+        if: matrix.os_name == 'linux'
+        env:
+          RELEASE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release
+          TARGET: ${{ matrix.target }}
+          GLIBC_MAX: ${{ inputs.glibc_max }}
+        run: |
+          set -euo pipefail
+          FLOOR=""
+          while IFS= read -r -d '' BIN; do
+            file "$BIN" | grep -q ELF || continue
+            NEED="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -1 || true)"
+            [ -n "$NEED" ] || continue
+            echo "$(basename "$BIN") needs glibc ${NEED}"
+            FLOOR="$(printf '%s\n%s\n' "$FLOOR" "$NEED" | sed '/^$/d' | sort -V | tail -1)"
+          done < <(find "$RELEASE_DIR" -maxdepth 1 -type f -perm -u+x -print0)
+          [ -n "$FLOOR" ] || { echo "::error::No Linux binary found in ${RELEASE_DIR}"; exit 1; }
+          echo "### ${TARGET}: needs glibc ${FLOOR}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$GLIBC_MAX" ] && [ "$(printf '%s\n%s\n' "$GLIBC_MAX" "$FLOOR" | sort -V | tail -1)" != "$GLIBC_MAX" ]; then
+            echo "::error::${TARGET} needs glibc ${FLOOR}, above glibc_max ${GLIBC_MAX} - build on an older image (linux_*_runner)"
+            exit 1
+          fi
 
       # The kit's own scripts, at the commit the caller pinned. Checked out
       # AFTER tauri-action so its config/workspace discovery never sees them.

@@ -534,6 +534,7 @@ Apple Silicon machine while the pipeline itself stays on GitHub Actions:
 | Workflow | Input | Covers |
 | --- | --- | --- |
 | `release.yml` | `macos_arm_runner` / `macos_intel_runner` | the two darwin build legs |
+| `release.yml` | `linux_x64_runner` / `linux_arm_runner` | the two Linux legs (their image sets the glibc floor - `glibc_max` gates it) |
 | `rust-checks.yml` | `macos_runner` | the per-push macOS gate |
 | `app-store.yml` | `macos_runner` / `ios_runner` | App Store builds |
 
