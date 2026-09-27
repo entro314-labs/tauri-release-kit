@@ -149,6 +149,7 @@ overloading it here would be worse.
 ```yaml
   app-store:
     needs: release
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     concurrency:                   # one upload at a time, across tags
       group: app-store-${{ github.repository }}
       cancel-in-progress: false

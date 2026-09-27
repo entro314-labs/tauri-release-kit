@@ -16,6 +16,7 @@ mirror on every dependency change, and compiling the app a second time. The
 ```yaml
   flatpak:
     needs: release
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@main
     permissions:
       contents: write
@@ -133,6 +134,7 @@ the Flatpak one, and the resulting crashes are very hard to trace back. Use
 ```yaml
   aur:
     needs: release
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     uses: entro314-labs/tauri-release-kit/.github/workflows/aur.yml@main
     with:
       tag: ${{ inputs.tag || '' }}

@@ -3,10 +3,11 @@
 # inputs. Full consumer checklist: tauri-release-kit README.
 #
 # The `release` job is the pipeline. The jobs after it are OPTIONAL
-# distribution channels chained with `needs: release` so they run against a
-# published release — DELETE the ones you do not ship. Each one also skips
-# itself with a warning when its credentials are absent, so leaving one in
-# place while you set its secrets up is safe.
+# distribution channels chained with `needs: release` and gated on its
+# `published` output, so they run against a published release even when a
+# later channel inside it (winget, the cask) failed — DELETE the ones you do
+# not ship. Each one also skips itself with a warning when its credentials
+# are absent, so leaving one in place while you set its secrets up is safe.
 name: Release
 
 on:
@@ -129,6 +130,9 @@ jobs:
   #     workflow artifact. DELETE this job if you don't ship a Flatpak.
   flatpak:
     needs: release
+    # Runs once the release is public, even when a later job in it (winget,
+    # the cask, bump-version) failed the call.
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     uses: entro314-labs/tauri-release-kit/.github/workflows/flatpak.yml@main
     permissions:
       contents: write
@@ -150,6 +154,9 @@ jobs:
   #     DELETE this job if you don't publish to the AUR.
   aur:
     needs: release
+    # Runs once the release is public, even when a later job in it (winget,
+    # the cask, bump-version) failed the call.
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     uses: entro314-labs/tauri-release-kit/.github/workflows/aur.yml@main
     with:
       tag: ${{ inputs.tag || '' }}
@@ -172,6 +179,9 @@ jobs:
   #     DELETE this job if you don't submit to the App Store.
   app-store:
     needs: release
+    # Runs once the release is public, even when a later job in it (winget,
+    # the cask, bump-version) failed the call.
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
     # One App Store upload at a time for this app, across ALL tags. The
     # workflow-level group above only serialises runs of the same tag. Two
     # releases in flight with a pinned bundle.{macOS,iOS}.bundleVersion (see

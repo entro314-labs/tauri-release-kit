@@ -412,6 +412,13 @@ on:
       SENTRY_AUTH_TOKEN:
         description: 'Optional: exported to the build for sourcemap/symbol upload tooling (non-empty only)'
         required: false
+    outputs:
+      published:
+        description: >-
+          'true' once the release is public. A job after the publish (Homebrew,
+          winget, Scoop, bump-version) can still fail the call; gate follow-on
+          channels on this, not on the call's result.
+        value: ${{ jobs.publish-release.outputs.published }}
 
 # Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
 permissions:
@@ -2009,6 +2016,8 @@ jobs:
     # Flips the draft public and maintains the rolling latest-<channel> release.
     permissions:
       contents: write
+    outputs:
+      published: ${{ steps.publish.outcome == 'success' }}
     # attest never fails the release on its own (continue-on-error on the
     # attest step); it still has to have run, so provenance precedes publish.
     if: always() && needs.build-and-release.result == 'success' && needs.create-updater-json.result == 'success' && needs.verify-release.result == 'success' && needs.attest.result == 'success'
