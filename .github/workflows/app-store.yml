@@ -374,7 +374,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f "$APPSTORE_CONFIG" ]; then
-            echo "::error::App Store config '${APPSTORE_CONFIG}' not found under ${PWD}. Copy templates/tauri.appstore.conf.json into src-tauri/ and adjust it — building without it submits a non-sandboxed, updater-enabled bundle that review will reject."
+            echo "::error::App Store config '${APPSTORE_CONFIG}' not found under ${PWD}. Copy tauri-release-kit's templates/appstore/tauri.appstore.conf.json into src-tauri/ and adjust it — building without it submits a non-sandboxed, updater-enabled bundle that review will reject."
             exit 1
           fi
           pnpm exec tauri build --no-bundle --target "$TARGET"

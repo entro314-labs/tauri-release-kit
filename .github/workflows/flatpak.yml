@@ -274,7 +274,7 @@ jobs:
             fi
             cp "$METAINFO" "$OUT"
           else
-            echo "::warning::No metainfo input — generating a placeholder. It builds and installs, but Flathub review WILL reject it: a real one needs a summary, description, screenshots, a license and release notes. Start from templates/flatpak.metainfo.xml."
+            echo "::warning::No metainfo input — generating a placeholder. It builds and installs, but Flathub review WILL reject it: a real one needs a summary, description, screenshots, a license and release notes. Start from tauri-release-kit's templates/flatpak/flatpak.metainfo.xml."
             cat > "$OUT" <<XML
           <?xml version="1.0" encoding="UTF-8"?>
           <component type="desktop-application">
