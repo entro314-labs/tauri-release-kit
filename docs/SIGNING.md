@@ -466,7 +466,7 @@ sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missi
 `<productName>_<version>.spdx.json` and `.cdx.json` are Syft SBOMs of the
 tagged source, listed in (and so signed through) `SHA256SUMS`.
 
-**Build provenance.** The `attest` job runs `actions/attest-build-provenance`
+**Build provenance.** The `attest` job runs `actions/attest`
 over every file in `SHA256SUMS`. The attestation is stored on the repository
 that RAN the workflow — the app repo — even when the files are downloaded from
 a `releases_repo` mirror, and it is signed by this kit's reusable workflow,

@@ -1739,6 +1739,9 @@ jobs:
       - name: Install Syft
         id: syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          # The action's default (1.51.1) predates the fix for GHSA-mw2c-m758-9v5q.
+          syft-version: v1.52.0
 
       # A source-level SBOM (every locked dependency Syft recognises —
       # Cargo.lock, pnpm-lock.yaml, …) in both formats scanners ingest,
@@ -1897,7 +1900,7 @@ jobs:
       - name: Attest build provenance
         id: attest
         continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/attest/SHA256SUMS
 
