@@ -157,6 +157,19 @@ jobs:
   #     the released .deb. Needs the AUR_SSH_PRIVATE_KEY secret; without it the
   #     PKGBUILD is still rendered and validated, just not pushed.
   #     DELETE this job if you don't publish to the AUR.
+  # Signed APT + DNF repositories on GitHub Pages (linux-repos.yml's header lists the setup).
+  # linux-repos:
+  #   needs: release
+  #   if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
+  #   uses: entro314-labs/tauri-release-kit/.github/workflows/linux-repos.yml@main
+  #   with:
+  #     tag: ${{ inputs.tag || '' }}
+  #     releases_repo: 'my-org/myapp-releases'
+  #     pages_repo: 'my-org/myapp-packages'
+  #     base_url: 'https://my-org.github.io/myapp-packages'
+  #     product_name: 'myapp'
+  #   secrets: inherit
+
   aur:
     needs: release
     # Runs once the release is public, even when a later job in it (winget,

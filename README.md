@@ -28,8 +28,9 @@ encodes a CI failure that actually happened; read
 | `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
 | `.github/workflows/app-store.yml` | Builds and uploads a Mac App Store `.pkg` / iOS `.ipa` |
 | `.github/workflows/credentials.yml` | Credential preflight: proves the signing/publishing secrets still work, without building |
+| `.github/workflows/linux-repos.yml` | Signed APT and DNF/YUM repositories on GitHub Pages from the released `.deb` / `.rpm` |
 
-All seven are `workflow_call` reusable workflows — fixes land here once and
+All of them are `workflow_call` reusable workflows — fixes land here once and
 every app picks them up. Pin `@main` for latest or a tag for stability. The
 last three chain off `release.yml` with `needs:` in one caller file; see
 [`templates/release.yml`](templates/release.yml).
@@ -45,6 +46,7 @@ last three chain off `release.yml` with `needs:` in one caller file; see
 | Scoop bucket (stable only) | the released NSIS installer | `release.yml` (`scoop_bucket`) |
 | Flathub / Flatpak bundle | the released `.deb` | `flatpak.yml` |
 | Arch User Repository | the released `.deb` | `aur.yml` |
+| APT / DNF repositories (GitHub Pages) | the released `.deb` / `.rpm` | `linux-repos.yml` |
 | Mac App Store / iOS App Store | source (separate, sandboxed build) | `app-store.yml` |
 
 Assumptions about the calling repo: pnpm frontend (built via

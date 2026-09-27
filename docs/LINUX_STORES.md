@@ -226,10 +226,13 @@ the app version does not, bump `pkgrel`.
 "repack the release" approach these two use, and its store requires an
 interactive login this pipeline has nowhere to put.
 
-**Debian/Ubuntu repositories (apt).** Signing a repository means running one:
-`Release`/`Release.gpg`/`InRelease` metadata, a stable hosting location, and a
-key users add to their trust store. The `.deb` this kit produces installs
-fine with `dpkg -i`; a repository is a separate ongoing service, not a release
-step.
+**Debian/Ubuntu and Fedora repositories (apt, dnf).** `linux-repos.yml`
+publishes both as static files on a GitHub Pages site: the released `.deb` and
+`.rpm` files, `Release`/`InRelease`/`Release.gpg` and `Packages` for apt,
+`repodata` with a signed `repomd.xml` and a `.repo` file for dnf, the public
+key, and an install page - signed with the same `LINUX_GPG_PRIVATE_KEY` the
+release uses, keeping the newest few versions. It needs a repository serving
+its `gh-pages` branch and a `LINUX_REPO_TOKEN` that can push to it, and skips
+with a warning until both exist (see the workflow's header).
 
 **Homebrew** is covered — see the cask job in `release.yml` and the README.

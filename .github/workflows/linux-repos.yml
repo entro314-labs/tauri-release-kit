@@ -1,0 +1,187 @@
+# Reusable Linux package repositories: publishes the release's .deb and .rpm files as a signed APT
+# repository and a signed DNF/YUM repository on a GitHub Pages site, so users install with apt /
+# dnf and get updates from their system's package updates instead of downloading installers.
+#
+# The repositories are static files (scripts/linux-repos.sh builds them): apt/dists (Release,
+# InRelease, Release.gpg, Packages), apt/pool, rpm/repodata (+ repomd.xml.asc), rpm/<product>.repo,
+# key.asc and an index.html with the install commands. Each run adds the new release and keeps the
+# newest `keep_versions` of each package file.
+#
+# Run it AFTER release.yml has published the release (`needs: release` in the caller).
+#
+# Setup, once:
+#   - a repository for the site (e.g. my-org/myapp-packages) with GitHub Pages serving the
+#     `gh-pages` branch;
+#   - LINUX_REPO_TOKEN: a fine-grained PAT with Contents: Read and write on that repository;
+#   - LINUX_GPG_PRIVATE_KEY (+ LINUX_GPG_PASSPHRASE): the same key release.yml signs RPMs and
+#     SHA256SUMS with - it signs the repository metadata, and key.asc is its public half.
+# Without the token or the key the job skips with a warning, so it can be wired in first.
+
+name: Linux repositories (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pages_repo:
+        description: "'owner/name' of the repository whose gh-pages branch serves the package site"
+        required: true
+        type: string
+      base_url:
+        description: >-
+          URL the site is served at (e.g. https://my-org.github.io/myapp-packages). Written into
+          the .repo file and the install instructions.
+        required: true
+        type: string
+      product_name:
+        description: 'Package name as the .deb/.rpm carry it (the tauri productName, lowercased)'
+        required: true
+        type: string
+      tag:
+        description: 'Release tag to publish (vX.Y.Z). Defaults to the pushed tag ref.'
+        required: false
+        type: string
+        default: ''
+      releases_repo:
+        description: "'owner/name' holding the published release. Empty = the calling repository."
+        required: false
+        type: string
+        default: ''
+      keep_versions:
+        description: 'Newest versions kept per package file (per architecture and format)'
+        required: false
+        type: number
+        default: 3
+      environment:
+        description: >-
+          Optional GitHub environment (in the CALLING repo) holding this workflow's secrets. Pass
+          the same value as release.yml's environment input.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      LINUX_REPO_TOKEN:
+        description: 'Fine-grained PAT with Contents: Read and write on pages_repo'
+        required: false
+      LINUX_GPG_PRIVATE_KEY:
+        description: 'ASCII-armored (or base64 of) the GPG private key that signs the repositories'
+        required: false
+      LINUX_GPG_PASSPHRASE:
+        description: "The key's passphrase, if it has one"
+        required: false
+      LINUX_GPG_KEY_ID:
+        description: 'Key id to sign with, when the key file holds more than one'
+        required: false
+      RELEASES_TOKEN:
+        description: 'Fine-grained PAT with Contents: Read on releases_repo, when that repo is private'
+        required: false
+
+# Each job declares what it needs; in a workflow_call the caller's grant is the ceiling.
+permissions:
+  contents: read
+
+jobs:
+  repositories:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check prerequisites
+        id: prereq
+        env:
+          LINUX_REPO_TOKEN: ${{ secrets.LINUX_REPO_TOKEN }}
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${LINUX_REPO_TOKEN:-}" ] || [ -z "${LINUX_GPG_PRIVATE_KEY:-}" ]; then
+            echo "::warning::LINUX_REPO_TOKEN or LINUX_GPG_PRIVATE_KEY is not set - skipping the Linux repositories."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the kit's scripts
+        if: steps.prereq.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .release-kit
+          persist-credentials: false
+
+      - name: Install repository tools
+        if: steps.prereq.outputs.ready == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils createrepo-c dpkg-dev gnupg
+
+      - name: Import the signing key
+        id: key
+        if: steps.prereq.outputs.ready == 'true'
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="${RUNNER_TEMP}/repo-signing.asc"
+          if printf '%s' "$LINUX_GPG_PRIVATE_KEY" | grep -q 'BEGIN PGP PRIVATE KEY'; then
+            printf '%s\n' "$LINUX_GPG_PRIVATE_KEY" > "$KEY_FILE"
+          else
+            printf '%s' "$LINUX_GPG_PRIVATE_KEY" | base64 --decode > "$KEY_FILE"
+          fi
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo 'allow-loopback-pinentry' >> ~/.gnupg/gpg-agent.conf
+          echo 'pinentry-mode loopback' >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+          gpg --batch --yes ${LINUX_GPG_PASSPHRASE:+--passphrase "$LINUX_GPG_PASSPHRASE"} --import "$KEY_FILE"
+          rm -f "$KEY_FILE"
+          KEY_ID="${LINUX_GPG_KEY_ID:-$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')}"
+          [ -n "$KEY_ID" ] || { echo "::error::No secret key present after import"; exit 1; }
+          echo "id=${KEY_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the release's packages
+        if: steps.prereq.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+          REPO: ${{ inputs.releases_repo || github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/packages"
+          gh release download "$TAG" --repo "$REPO" --dir "${RUNNER_TEMP}/packages" \
+            --pattern '*.deb' --pattern '*.rpm'
+          ls -l "${RUNNER_TEMP}/packages"
+
+      - name: Build and publish the repositories
+        if: steps.prereq.outputs.ready == 'true'
+        env:
+          TOKEN: ${{ secrets.LINUX_REPO_TOKEN }}
+          PAGES_REPO: ${{ inputs.pages_repo }}
+          BASE_URL: ${{ inputs.base_url }}
+          PRODUCT: ${{ inputs.product_name }}
+          KEEP: ${{ inputs.keep_versions }}
+          KEY_ID: ${{ steps.key.outputs.id }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          SITE="${RUNNER_TEMP}/site"
+          if git clone --depth 1 --branch gh-pages "https://x-access-token:${TOKEN}@github.com/${PAGES_REPO}.git" "$SITE" 2>/dev/null; then
+            echo "Updating the existing gh-pages branch of ${PAGES_REPO}"
+          else
+            git init -q -b gh-pages "$SITE"
+            git -C "$SITE" remote add origin "https://x-access-token:${TOKEN}@github.com/${PAGES_REPO}.git"
+          fi
+          bash .release-kit/scripts/linux-repos.sh "$SITE" "${RUNNER_TEMP}/packages" "$PRODUCT" "$BASE_URL" "$KEY_ID" "$KEEP"
+          cd "$SITE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          git commit -q -m "Publish ${PRODUCT} ${TAG}"
+          git push origin gh-pages
+          echo "::notice::Published ${PRODUCT} ${TAG} to ${BASE_URL} (apt: ${BASE_URL}/apt, dnf: ${BASE_URL}/rpm/${PRODUCT}.repo)"
