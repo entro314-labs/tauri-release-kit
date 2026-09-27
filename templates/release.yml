@@ -32,7 +32,7 @@ on:
 concurrency:
   # Keyed on the tag, so a dispatch retry serialises behind a still-running push
   # of the same tag instead of racing it for the same draft.
-  group: release-${{ inputs.tag || github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
