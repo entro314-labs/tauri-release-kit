@@ -186,9 +186,11 @@ workflow says exactly that when verification fails.
 
 ### Version mapping
 
-Arch forbids `-` in `pkgver` (it separates version from release), so
-`v1.0.0-beta.1` becomes `1.0.0_beta.1`. That still orders correctly under
-`vercmp`, so upgrades work.
+Arch forbids `-` in `pkgver` (it separates version from release), so the
+hyphens are deleted: `v1.0.0-beta.1` becomes `1.0.0beta.1`, which `vercmp`
+sorts before `1.0.0`, so the stable release is an upgrade from the beta. The
+underscore form (`1.0.0_beta.1`) sorts *after* `1.0.0` and would strand beta
+users on the prerelease.
 
 ### The generated PKGBUILD
 
