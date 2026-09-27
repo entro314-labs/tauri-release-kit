@@ -28,6 +28,13 @@ name: App Store (reusable)
 on:
   workflow_call:
     inputs:
+      tag:
+        description: >-
+          Release tag to build (vX.Y.Z). Defaults to the triggering ref. Pass the
+          caller's dispatch tag input, or a dispatch retry builds the branch HEAD.
+        required: false
+        type: string
+        default: ''
       project_path:
         description: 'Path to the Tauri app package (contains src-tauri/)'
         required: false
@@ -195,6 +202,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.prereq.outputs.ready == 'true'
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - name: Install pnpm
@@ -496,6 +504,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.prereq.outputs.ready == 'true'
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - name: Install pnpm

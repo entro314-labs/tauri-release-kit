@@ -154,6 +154,7 @@ overloading it here would be worse.
       cancel-in-progress: false
     uses: entro314-labs/tauri-release-kit/.github/workflows/app-store.yml@main
     with:
+      tag: ${{ inputs.tag || '' }} # a dispatch retry builds the tag, not the branch
       project_path: 'apps/desktop'
       product_name: 'MyApp'        # productName exactly, including case
       macos: true
