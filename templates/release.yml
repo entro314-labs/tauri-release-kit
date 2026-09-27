@@ -8,6 +8,10 @@
 # later channel inside it (winget, the cask) failed — DELETE the ones you do
 # not ship. Each one also skips itself with a warning when its credentials
 # are absent, so leaving one in place while you set its secrets up is safe.
+#
+# This template needs the kit at 0eb66cc or later (app-store.yml's `tag`
+# input, release.yml's `published` output): bump every kit ref in the same
+# commit that re-copies it.
 name: Release
 
 on:
