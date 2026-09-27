@@ -111,10 +111,14 @@ on:
         type: string
         default: 'macos-15'
       ios_runner:
-        description: 'Runner for the iOS job; same rules as macos_runner.'
+        description: >-
+          Runner for the iOS job; same rules as macos_runner. App Store Connect
+          has required iOS uploads built with Xcode 26 since 2026-04-28, and
+          macos-26 is the hosted image whose DEFAULT Xcode is 26 (macos-15
+          defaults to 16.4). A self-hosted runner must have Xcode 26 selected.
         required: false
         type: string
-        default: 'macos-15'
+        default: 'macos-26'
     secrets:
       # --- App Store Connect API key: the only auth altool accepts, and what
       #     Xcode automatic signing uses for iOS. Required for any upload. ---

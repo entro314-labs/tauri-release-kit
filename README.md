@@ -537,6 +537,11 @@ Apple Silicon machine while the pipeline itself stays on GitHub Actions:
 | `rust-checks.yml` | `macos_runner` | the per-push macOS gate |
 | `app-store.yml` | `macos_runner` / `ios_runner` | App Store builds |
 
+`ios_runner` defaults to `macos-26`, not `macos-15`: App Store Connect rejects
+iOS builds made with anything older than Xcode 26, and `macos-26` is the
+hosted image that selects it by default. A self-hosted mac used for iOS needs
+Xcode 26 as its selected Xcode (`xcode-select -p`).
+
 Each input takes a **single self-hosted runner label** (e.g. `macbook`) and
 defaults to the GitHub-hosted image. Linux and Windows legs stay hosted —
 their minutes are cheap and `windows-11-arm` has no self-hosted equivalent
