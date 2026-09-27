@@ -371,7 +371,8 @@ reads a signing or publishing secret (`check-changelog`, `create-release`,
 `build-and-release`, `create-updater-json`, `checksums`, `attest`,
 `verify-release`, `publish-release`, `publish-homebrew-cask`,
 `publish-winget`, `publish-scoop`) runs in that
-GitHub environment,
+GitHub environment — and so do `flatpak.yml`, `aur.yml` and `app-store.yml`
+when they are passed the same `environment` input,
 so `TAURI_SIGNING_PRIVATE_KEY`, the Apple/Windows/Linux signing secrets,
 `APP_PRIVATE_KEY`, `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN`, `WINGET_TOKEN` and
 `SCOOP_TAP_TOKEN` can be moved out of repo-level

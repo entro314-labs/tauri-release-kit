@@ -50,6 +50,14 @@ on:
         required: false
         type: string
         default: ''
+      environment:
+        description: >-
+          Optional GitHub environment (in the CALLING repo) holding this
+          workflow's secrets. Pass the same value as release.yml's environment
+          input, or secrets moved into that environment read as unset here.
+        required: false
+        type: string
+        default: ''
       releases_repo:
         description: "'owner/name' hosting the release assets. Empty = this repo."
         required: false
@@ -126,6 +134,7 @@ jobs:
   aur:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    environment: ${{ inputs.environment }}
     # gh release view/download only; publishing goes over SSH to the AUR.
     permissions:
       contents: read

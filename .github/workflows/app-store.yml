@@ -35,6 +35,14 @@ on:
         required: false
         type: string
         default: ''
+      environment:
+        description: >-
+          Optional GitHub environment (in the CALLING repo) holding this
+          workflow's secrets. Pass the same value as release.yml's environment
+          input, or secrets moved into that environment read as unset here.
+        required: false
+        type: string
+        default: ''
       project_path:
         description: 'Path to the Tauri app package (contains src-tauri/)'
         required: false
@@ -164,6 +172,7 @@ jobs:
     if: inputs.macos
     runs-on: ${{ inputs.macos_runner }}
     timeout-minutes: 180
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
     steps:
@@ -472,6 +481,7 @@ jobs:
     if: inputs.ios
     runs-on: ${{ inputs.ios_runner }}
     timeout-minutes: 180
+    environment: ${{ inputs.environment }}
     permissions:
       contents: read
     steps:

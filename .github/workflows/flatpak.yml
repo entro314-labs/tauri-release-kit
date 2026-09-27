@@ -26,6 +26,14 @@ on:
         required: false
         type: string
         default: ''
+      environment:
+        description: >-
+          Optional GitHub environment (in the CALLING repo) holding this
+          workflow's secrets. Pass the same value as release.yml's environment
+          input, or secrets moved into that environment read as unset here.
+        required: false
+        type: string
+        default: ''
       releases_repo:
         description: "'owner/name' hosting the release assets. Empty = this repo."
         required: false
@@ -126,6 +134,7 @@ jobs:
         arch: [x86_64, aarch64]
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     timeout-minutes: 60
+    environment: ${{ inputs.environment }}
     # gh release upload of the bundle, in same-repo mode.
     permissions:
       contents: write
