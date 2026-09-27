@@ -458,14 +458,24 @@ downloads every asset on the draft and publishes, alongside them:
 - `SHA256SUMS.asc` and `<KEY_ID>.asc` (the public key) — only when
   `LINUX_GPG_PRIVATE_KEY` is set, signed with that same key;
 - `<productName>_<version>.spdx.json` and `.cdx.json` — a Syft SBOM of the
-  tagged source (every lockfile Syft recognises).
+  tagged source (every lockfile Syft recognises);
+- `provenance.json` — the repository, the exact commit every leg built, the
+  tag, the workflow run and the kit commit, with the SHA-256 of every asset,
+  as one machine-readable file (itself listed in `SHA256SUMS`).
+
+It then labels every asset so the release page reads "macOS (Apple Silicon) ·
+disk image" and "… · updater signature" instead of raw file names
+(`scripts/asset-labels.mjs`); the file names the updater uses don't change.
+Asset downloads and uploads in these jobs retry transient API failures.
 
 Names and format match linux-release-kit. The `attest` job then records
 GitHub build provenance for every file in `SHA256SUMS`. It is stored on the
 **app** repository even when releases live on `releases_repo`, and is only
 available for public repositories unless the org is on GitHub Enterprise
 Cloud — on a private Free/Pro/Team repo it fails with a warning and the
-release continues. How to verify each of these: [docs/SIGNING.md
+release continues. `cosign_sign: true` adds keyless Sigstore bundles for
+`SHA256SUMS` and each AppImage, which work from a private repository (with the
+caveat that the signing certificate is public - see docs/SIGNING.md). How to verify each of these: [docs/SIGNING.md
 § 5](docs/SIGNING.md#5-checksums-sbom-and-build-provenance). The `.flatpak`
 bundle `flatpak.yml` attaches after publish is not in `SHA256SUMS`.
 

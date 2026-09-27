@@ -335,7 +335,7 @@ function runFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'rk-run-'))
   writeFileSync(join(dir, 'tauri.conf.json'), JSON.stringify({ productName: 'MyApp', plugins: { updater: { pubkey: PUBKEY } } }))
   const targets = ['linux-x86_64']
-  const names = ['latest.json', 'MyApp_1.2.3_amd64.AppImage', 'MyApp_1.2.3_amd64.AppImage.sig', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS']
+  const names = ['latest.json', 'MyApp_1.2.3_amd64.AppImage', 'MyApp_1.2.3_amd64.AppImage.sig', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS', 'provenance.json']
   const contents = new Map([[0, JSON.stringify(goodManifest(targets))], [2, SIG], [5, sumsFor(names)]])
   const env = {
     RELEASE_ID: '7', REL_OWNER: 'org', REL_NAME: 'myapp-releases', TAG: 'v1.2.3', CHANNEL: 'stable',
@@ -368,14 +368,14 @@ test('run: re-reads eight times, then fails with every broken check in the summa
 })
 
 test('checksumAssets adds the signature and public key only when signed', () => {
-  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3' }), ['SHA256SUMS', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json'])
+  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3' }), ['SHA256SUMS', 'provenance.json', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json'])
   const present = ['SHA256SUMS', 'SHA256SUMS.asc', 'ABCD.asc', 'MyApp_1.2.3_amd64.AppImage']
-  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(3), ['SHA256SUMS.asc', 'ABCD.asc'])
+  assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(4), ['SHA256SUMS.asc', 'ABCD.asc'])
 })
 
 test('checksumAssets: a signed release needs exactly one public key beside SHA256SUMS.asc', () => {
   for (const present of [['SHA256SUMS.asc'], ['SHA256SUMS.asc', 'A.asc', 'B.asc']]) {
-    assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(3), ['SHA256SUMS.asc', '<KEY_ID>.asc'])
+    assert.deepEqual(checksumAssets({ product: 'MyApp', version: '1.2.3', signed: true, present }).slice(4), ['SHA256SUMS.asc', '<KEY_ID>.asc'])
   }
 })
 
@@ -469,7 +469,7 @@ test('buildChecks: a product name with a space, stored renamed by GitHub, labell
 test('cosign: a Sigstore bundle is expected beside each AppImage and SHA256SUMS, and is exempt from the sums', () => {
   assert.deepEqual(
     checksumAssets({ product: 'MyApp', version: '1.2.3', cosign: true }),
-    ['SHA256SUMS', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS.sigstore.json'],
+    ['SHA256SUMS', 'provenance.json', 'MyApp_1.2.3.spdx.json', 'MyApp_1.2.3.cdx.json', 'SHA256SUMS.sigstore.json'],
   )
   const { required } = expectedAssets({
     version: '1.2.3', channel: 'stable', targets: ['linux-x86_64'],

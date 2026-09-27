@@ -22,8 +22,8 @@
  *     envelope, and was made by the key whose public half the app ships
  *     (plugins.updater.pubkey) — the tauri CLI only warns about a mismatched key, and a
  *     mismatch breaks every installed copy's next update
- *   - SHA256SUMS (written by the checksums job) lists every asset except itself and the
- *     *.asc files, and GitHub's digest of each asset equals its line — which catches an
+ *   - SHA256SUMS (written by the checksums job) lists every asset except itself, the *.asc
+ *     files and the *.sigstore.json bundles, and GitHub's digest of each asset equals its line — which catches an
  *     asset re-uploaded by a retried leg after the sums were written
  *
  * Expected asset names are computed, never listed per app. They follow tauri-action v1's
@@ -371,7 +371,7 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
 }
 
 /**
- * The release-wide files the checksums job adds: SHA256SUMS, the two SBOMs, and — when the
+ * The release-wide files the checksums job adds: SHA256SUMS, provenance.json, the two SBOMs, and — when the
  * Linux GPG key is configured — SHA256SUMS.asc plus the public key as <KEY_ID>.asc.
  *
  * The key id is not handed over by the checksums job: when LINUX_GPG_KEY_ID is a secret the
@@ -381,7 +381,7 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
  * @param {{ product: string, version: string, signed?: boolean, present?: string[], cosign?: boolean }} input
  */
 export function checksumAssets({ product, version, signed = false, present = [], cosign = false }) {
-  const names = ['SHA256SUMS', `${product}_${version}.spdx.json`, `${product}_${version}.cdx.json`]
+  const names = ['SHA256SUMS', 'provenance.json', `${product}_${version}.spdx.json`, `${product}_${version}.cdx.json`]
   if (cosign) names.push('SHA256SUMS.sigstore.json')
   if (signed) {
     const keys = present.filter((n) => n.endsWith('.asc') && n !== 'SHA256SUMS.asc')
