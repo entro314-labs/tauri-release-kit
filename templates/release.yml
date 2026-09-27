@@ -138,6 +138,7 @@ jobs:
       contents: write
     with:
       tag: ${{ inputs.tag || '' }}
+      # environment: 'release'         # ← same as the release job's, if set
       releases_repo: 'my-org/myapp-releases'
       # app_client_id: 'Iv23li...'     # ← same GitHub App as the release job
       app_id: 'com.example.myapp'      # ← MUST equal tauri.conf.json identifier
@@ -160,6 +161,7 @@ jobs:
     uses: entro314-labs/tauri-release-kit/.github/workflows/aur.yml@main
     with:
       tag: ${{ inputs.tag || '' }}
+      # environment: 'release'         # ← same as the release job's, if set
       releases_repo: 'my-org/myapp-releases'
       # app_client_id: 'Iv23li...'     # ← same GitHub App as the release job
       pkgname: 'myapp-bin'             # ← the `-bin` suffix is required by Arch
@@ -193,6 +195,7 @@ jobs:
     uses: entro314-labs/tauri-release-kit/.github/workflows/app-store.yml@main
     with:
       tag: ${{ inputs.tag || '' }}
+      # environment: 'release'         # ← same as the release job's, if set
       project_path: 'apps/desktop'
       product_name: 'MyApp'            # ← productName exactly, including case
       macos: true
