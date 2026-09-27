@@ -146,7 +146,7 @@ jobs:
       arches: 'x86_64'                 # ← add aarch64 once you ship an arm64 .deb
       # metainfo: 'apps/desktop/flatpak.metainfo.xml'  # ← required for Flathub
       # tray_icon: true                # ← only if the app has a tray icon
-      # runtime_version: '48'
+      # runtime_version: '51'
     secrets: inherit
 
   # --- OPTIONAL: Arch User Repository. Publishes a `-bin` package built from

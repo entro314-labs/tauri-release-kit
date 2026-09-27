@@ -58,7 +58,7 @@ on:
           keeps several branches alive, so pin one and bump it deliberately.
         required: false
         type: string
-        default: '48'
+        default: '51'
       arches:
         description: >-
           Comma-separated architectures to build (subset of: x86_64, aarch64).

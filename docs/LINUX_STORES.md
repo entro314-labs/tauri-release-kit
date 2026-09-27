@@ -100,8 +100,10 @@ their software centre:
 
 `runtime_version` pins the `org.gnome.Platform` / `org.gnome.Sdk` branch,
 which supplies WebKitGTK, GTK and libsoup. Flathub keeps several branches
-alive at once; pin one and bump it deliberately. A retired branch fails at the
-install step with a message telling you to pick a live one.
+alive at once; pin one and bump it deliberately. Flathub keeps serving
+end-of-life branches, so an old pin still installs and builds — it just stops
+getting security updates. The install step's error only catches a branch that
+is gone altogether. GNOME supports a branch until the next release after it.
 
 ### ARM
 
