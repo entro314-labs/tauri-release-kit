@@ -294,15 +294,17 @@ on:
       post_release_bump:
         description: >-
           Open a post-release PR bumping the app repo to the next patch
-          version (stable releases only). Set false when a local release
-          driver (e.g. release-kit) writes the version BEFORE tagging —
-          otherwise two writers race on the same version files every release.
+          version (stable releases only). Off by default: release-kit, the
+          recommended driver, writes the version BEFORE tagging, and a second
+          writer after the release races it on the same version files. Turn
+          it on only when versions are set by hand (version-manager.ts) and
+          you want main moved past the released version automatically.
           Opening the PR needs the app repo's "Allow GitHub Actions to create
           and approve pull requests" setting; without it the branch is pushed
           and the job fails.
         required: false
         type: boolean
-        default: true
+        default: false
       macos_linkage_check:
         description: >-
           Fail a darwin leg when any Mach-O file in the built .app (main
@@ -2911,8 +2913,8 @@ jobs:
           git push origin HEAD
           echo "::notice::Updated ${BUCKET}/${MANIFEST} to ${BARE}"
 
-  # Post-release patch bump PR (stable releases only; opt out via
-  # post_release_bump when a local driver bumps before tagging). Default
+  # Post-release patch bump PR (stable releases only; opt in via
+  # post_release_bump — off by default, see the input). Default
   # GITHUB_TOKEN pushes don't trigger workflows — re-run CI on the PR
   # manually if needed.
   bump-version:

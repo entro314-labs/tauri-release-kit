@@ -5,7 +5,7 @@ Shared CI/CD + versioning for Tauri apps. One reusable release pipeline —
 signing on all three OSes, minisign-signed auto-updater artifacts, per-channel
 rolling update manifests (`stable` / `beta` / `alpha`), changelog guard,
 cross-repo publishing to a public releases mirror, pre-publish verification,
-post-release version-bump PR — plus companion workflows that push the same
+opt-in post-release version-bump PR — plus companion workflows that push the same
 release onward to Homebrew, Flathub, the AUR, and the App Store, reusable Rust
 quality gates, a local preflight harness, and a version sync script.
 
