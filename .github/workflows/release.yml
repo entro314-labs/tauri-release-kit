@@ -325,6 +325,25 @@ on:
         required: false
         type: boolean
         default: false
+      webdriver_smoke:
+        description: >-
+          A command that checks the built app's UI through WebDriver on the
+          native Linux legs (e.g. 'node tooling/scripts/boot-smoke.ts'). It is
+          run from the repository root under Xvfb with tauri-driver listening
+          on 127.0.0.1:4444 and a fresh profile, and gets the app binary's
+          path as its last argument; a non-zero exit fails the leg before
+          anything is published. Empty (the default) skips it. Needs
+          webdriver_binary.
+        required: false
+        type: string
+        default: ''
+      webdriver_binary:
+        description: >-
+          File name of the app binary in target/<triple>/release that
+          webdriver_smoke drives (the main binary, not a sidecar).
+        required: false
+        type: string
+        default: ''
       winget_identifier:
         description: >-
           winget PackageIdentifier (e.g. 'MyOrg.MyApp') to submit each STABLE
@@ -1586,6 +1605,37 @@ jobs:
               pwsh -NoProfile -File .release-kit/scripts/smoke-windows.ps1 -BundleDir "$BUNDLE_DIR" -Version "$BARE" -Bundles "$BUNDLES"
               ;;
           esac
+
+      # Opt-in (webdriver_smoke): the app's own UI check, driven through
+      # tauri-driver on the built binary - the smoke test above proves the
+      # app starts, this proves it renders. Native Linux legs only (tauri-
+      # driver has no macOS driver; Windows needs msedgedriver pinned to the
+      # runner's WebView2). Details in scripts/webdriver-smoke.sh.
+      - name: WebDriver boot gate
+        if: inputs.webdriver_smoke != '' && matrix.os_name == 'linux'
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          SMOKE_COMMAND: ${{ inputs.webdriver_smoke }}
+          BINARY_NAME: ${{ inputs.webdriver_binary }}
+          RELEASE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release
+        run: |
+          set -euo pipefail
+          case "${RUNNER_ARCH}/${ARCH}" in
+            X64/x86_64|ARM64/aarch64) ;;
+            *)
+              echo "::notice::Skipping the WebDriver boot gate on ${TARGET}: this ${RUNNER_ARCH} runner cannot natively run ${ARCH} code."
+              exit 0
+              ;;
+          esac
+          if [ -z "$BINARY_NAME" ]; then
+            echo "::error::webdriver_smoke is set but webdriver_binary is empty"
+            exit 1
+          fi
+          # SMOKE_COMMAND is a trusted workflow input (the caller's own release.yml), split into words.
+          read -r -a COMMAND <<< "$SMOKE_COMMAND"
+          bash .release-kit/scripts/webdriver-smoke.sh "$RELEASE_DIR/$BINARY_NAME" "${COMMAND[@]}"
 
       # AppImage and RPM signature verification. APPIMAGETOOL_FORCE_SIGN
       # already fails the bundle on a signing error, so this catches the

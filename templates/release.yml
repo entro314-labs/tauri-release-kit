@@ -68,6 +68,10 @@ jobs:
       #     what each leg built (deb version, AppImage under Xvfb, MSI
       #     ProductVersion, NSIS install + launch, dmg verify + .app launch).
       # smoke_test: true
+      # --- WebDriver boot gate (optional): your UI check, run on the native
+      #     Linux legs through tauri-driver under Xvfb with a fresh profile.
+      # webdriver_smoke: node tooling/scripts/boot-smoke.ts
+      # webdriver_binary: my-app
       # --- Post-release patch-bump PR (default true). Set false when a local
       #     release driver (e.g. release-kit) writes the version BEFORE the
       #     tag — two writers otherwise race on the same version files.

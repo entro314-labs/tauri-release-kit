@@ -442,6 +442,27 @@ without a display, needs first-run setup, or single-instances itself fails
 it for reasons that are not bugs; turn it on once your app starts cleanly on
 a bare runner. The logic lives in [`scripts/smoke-*`](scripts/).
 
+### WebDriver boot gate (opt-in)
+
+The smoke test proves the app starts; `webdriver_smoke` proves its UI
+renders. On the native Linux legs the kit installs WebKitWebDriver and
+`tauri-driver`, starts the driver under Xvfb on `127.0.0.1:4444` with a fresh
+profile (`XDG_*` in a temp folder), and runs your command from the repository
+root with the built binary (`target/<triple>/release/<webdriver_binary>`) as
+its last argument. A non-zero exit fails the leg, so nothing is published.
+
+```yaml
+      webdriver_smoke: node tooling/scripts/boot-smoke.ts
+      webdriver_binary: my-app
+```
+
+What the command checks is up to the app: a plain WebDriver client that
+opens a session with `tauri:options.application`, waits for the UI and
+fails on the app's own error screen is enough. macOS has no WebKit driver
+for `tauri-driver`, and Windows would need an `msedgedriver` matching the
+runner's WebView2, so only Linux legs run it. Details in
+[`scripts/webdriver-smoke.sh`](scripts/webdriver-smoke.sh).
+
 ## Checksums, SBOM and build provenance
 
 > **Existing callers must add two permissions.** The `attest` job needs
