@@ -100,6 +100,13 @@ re-read this first.
   do not. Local builds therefore look different from released ones — design
   the background to read correctly with default placement.
 
+- **`bundle_dmg.sh` can die silently on self-hosted Macs.** It exits non-zero
+  with no message and leaves its scratch image mounted under `/Volumes/dmg.*`,
+  so the next dmg build on that runner fails the same way. It hit the first
+  mac leg of two consecutive meltemi releases and a re-run passed both times.
+  The build job now ejects leftover `/Volumes/dmg.*` before building and, on
+  macOS only, ejects again and retries the build once.
+
 - **Bundling three Linux formats can exhaust the runner disk.** deb + rpm +
   AppImage write the payload three times on top of a release target dir and
   node_modules, against ~14 GB free. It surfaces as "failed to run
