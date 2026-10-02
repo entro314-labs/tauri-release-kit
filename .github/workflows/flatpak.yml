@@ -381,10 +381,16 @@ jobs:
           mkdir -p extract
           ar -x app.deb --output extract
           tar -C extract -xf extract/data.tar.*
-          BIN=$(find extract/usr/bin -maxdepth 1 -type f | head -1)
-          [ -n "$BIN" ] || { echo "no executable in usr/bin of the .deb"; exit 1; }
-          BINARY=$(basename "$BIN")
-          install -Dm755 "$BIN" "/app/bin/$BINARY"
+          # Every executable, not the first one find returns: an app can ship
+          # sidecars (an MCP server, a CLI) beside its main binary, and the
+          # main one is not guaranteed to sort first.
+          found=0
+          for BIN in extract/usr/bin/*; do
+            [ -f "$BIN" ] || continue
+            install -Dm755 "$BIN" "/app/bin/$(basename "$BIN")"
+            found=1
+          done
+          [ "$found" = 1 ] || { echo "no executable in usr/bin of the .deb"; exit 1; }
           # Bundled resources/sidecars, when the app ships any.
           if [ -d "extract/usr/lib" ]; then
             mkdir -p /app/lib
@@ -412,10 +418,18 @@ jobs:
           # `command:` needs the real executable name. Only the .deb knows it
           # (Tauri derives it from mainBinaryName, which need not match
           # productName), so read it from the package instead of making the
-          # caller repeat a value that can silently drift.
+          # caller repeat a value that can silently drift. The launcher's own
+          # .desktop `Exec=` names the main binary; usr/bin alone cannot, since
+          # it may also hold sidecars. Tauri writes archive paths without a
+          # leading `./`, so the usr/bin fallback accepts both forms.
           # `|| true`: under pipefail a grep with no match (or a SIGPIPE from head) fails
           # the assignment and exits the script before the message below can say why.
-          BINARY=$(dpkg-deb -c "$DEB_PATH" | grep -oE '\./usr/bin/[^ /]+$' | head -1 | xargs -r basename || true)
+          BINARY=$(dpkg-deb --fsys-tarfile "$DEB_PATH" \
+            | tar -xOf - --wildcards '*usr/share/applications/*.desktop' 2>/dev/null \
+            | sed -n 's/^Exec=\([^ ]*\).*/\1/p' | head -1 | xargs -r basename || true)
+          if [ -z "${BINARY:-}" ]; then
+            BINARY=$(dpkg-deb -c "$DEB_PATH" | grep -oE '(\./)?usr/bin/[^ /]+$' | head -1 | xargs -r basename || true)
+          fi
           if [ -z "${BINARY:-}" ]; then
             echo "::error::No executable under usr/bin in ${DEB_PATH} — this does not look like a Tauri .deb"
             exit 1
