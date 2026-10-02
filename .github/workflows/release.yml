@@ -1391,7 +1391,73 @@ jobs:
           repositories: ${{ needs.check-changelog.outputs.releases_name }}
           permission-contents: write
 
+      # macOS: `bundle_dmg.sh` can die with no message and leave its scratch
+      # image mounted at /Volumes/dmg.*, and the next dmg build on a self-hosted
+      # runner then fails the same way. Eject any leftover before building, and
+      # again before the one retry below (seen on the first mac leg of two
+      # consecutive meltemi releases; the retry passed both times).
+      - name: Eject leftover dmg scratch volumes
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for vol in /Volumes/dmg.*; do
+            echo "Ejecting leftover $vol"
+            hdiutil detach "$vol" -force
+          done
+
       - name: Build and upload via tauri-action
+        id: build
+        # One retry on macOS only (dmg flake, see the eject step above).
+        continue-on-error: ${{ runner.os == 'macOS' }}
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          # Writes assets to the releases repo; the default GITHUB_TOKEN cannot
+          # write cross-repo, so RELEASES_TOKEN wins when configured.
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Empty-set is CORRECT for passwordless keys (var_os → Some("")).
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy's bundled strip pass breaks against the ubuntu-24.04
+          # (20260714+) images' binutils ("failed to run linuxdeploy" even with
+          # FUSE installed). Harmless elsewhere; the shipped binary is already
+          # stripped by cargo's release profile.
+          NO_STRIP: 'true'
+        with:
+          projectPath: ${{ inputs.project_path }}
+          tauriScript: pnpm tauri
+          # Config files merge in the order given (tauri CLI `--config` is a
+          # Vec): the per-OS bundle overlay first, then the signing overlay
+          # this run generated (empty on every leg without one). `--bundles`
+          # is the plan job's per-leg format list, already degraded for
+          # combinations the toolchain cannot produce.
+          args: --target ${{ matrix.target }} --config ${{ matrix.config }} ${{ steps.win_sign.outputs.config_arg }} --bundles ${{ matrix.bundles }}
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          # The release id may live on the (public) releases repo, so point
+          # tauri-action at it explicitly — its API calls default to
+          # context.repo, where a cross-repo id does not exist.
+          owner: ${{ needs.check-changelog.outputs.releases_owner }}
+          repo: ${{ needs.check-changelog.outputs.releases_name }}
+          # latest.json is assembled by create-updater-json below. NOTE: the
+          # input is `uploadUpdaterJson` on tauri-action v1 — the old
+          # `includeUpdaterJson` name is silently ignored (dead input) and lets
+          # tauri-action upload its own latest.json alongside ours.
+          uploadUpdaterJson: false
+
+      - name: Eject leftover dmg scratch volumes (before retry)
+        if: runner.os == 'macOS' && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for vol in /Volumes/dmg.*; do
+            echo "Ejecting leftover $vol"
+            hdiutil detach "$vol" -force
+          done
+
+      - name: Build and upload via tauri-action (retry)
+        if: runner.os == 'macOS' && steps.build.outcome == 'failure'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           # Writes assets to the releases repo; the default GITHUB_TOKEN cannot
