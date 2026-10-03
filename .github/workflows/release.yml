@@ -1051,8 +1051,12 @@ jobs:
         working-directory: ${{ inputs.project_path }}/src-tauri
         run: cargo fmt --all -- --check
 
+      # shell: bash - this step reads $TARGET, and the default shell on the Windows
+      # legs is PowerShell, where "$TARGET" is an unset PowerShell variable and
+      # cargo gets `--target ""` ("error: target was empty").
       - name: Rust clippy check
         working-directory: ${{ inputs.project_path }}/src-tauri
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: cargo clippy --target "$TARGET" -- -D warnings
