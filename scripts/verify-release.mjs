@@ -32,13 +32,20 @@
  * and the per-OS overlay the way tauri-action merges them. They are compared with what was
  * uploaded, not with what GitHub stored: GitHub renames special characters in asset names
  * ("My App_1.0.0_x64.dmg" is served as "My.App_1.0.0_x64.dmg"), and tauri-action records
- * the name it uploaded as the asset's label, so no copy of GitHub's renaming rule is needed.
- * Stored names are then resolved through that label wherever a URL or a download needs one.
+ * the name it uploaded as the asset's label. Stored names are then resolved through that label
+ * wherever a URL or a download needs one.
+ *
+ * That label does not last: the checksums job relabels every asset with a readable one
+ * (label-assets.sh), before this verification on a first run and before every retry. An asset
+ * carrying the kit's own label has lost its upload name, so it is matched by the name GitHub
+ * stored, with the expected name put through the same renaming (`safeName`).
  */
 
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+import { assetLabel } from './asset-labels.mjs'
 
 /** Per-target architecture tokens tauri-action puts in each format's file name. */
 export const TARGETS = {
@@ -69,7 +76,18 @@ export function safeName(name) {
  * @param {{ name: string, label?: string | null }} asset
  */
 export function uploadName(asset) {
-  return asset.label || asset.name
+  return asset.label && asset.label !== assetLabel(asset.name) ? asset.label : asset.name
+}
+
+/**
+ * The name GitHub stored an upload under, given a map of upload name to stored name: the
+ * recorded one, else the renamed form when that is on the release (the upload name was
+ * relabelled away, see the file header), else the upload name itself.
+ * @param {Map<string, string>} stored
+ * @param {string} uploaded
+ */
+export function storedName(stored, uploaded) {
+  return stored.get(uploaded) ?? stored.get(safeName(uploaded)) ?? uploaded
 }
 
 /** Splits a comma-separated input into trimmed, non-empty entries. */
@@ -284,10 +302,12 @@ export function repairPlan({ missing, version, channel, targets, bundles, naming
  * @param {{ required: string[], optional: string[] }} expected
  */
 export function compareAssets(present, expected) {
+  // Either spelling counts: the upload name, or the name GitHub stored it under (all that is
+  // left once the kit's readable label has replaced tauri-action's).
   const have = new Set(present)
-  const allowed = new Set([...expected.required, ...expected.optional])
+  const allowed = new Set([...expected.required, ...expected.optional].flatMap((n) => [n, safeName(n)]))
   return {
-    missing: expected.required.filter((n) => !have.has(n)),
+    missing: expected.required.filter((n) => !have.has(n) && !have.has(safeName(n))),
     unexpected: present.filter((n) => !allowed.has(n)),
   }
 }
@@ -359,7 +379,7 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
   const wanted = targets.map((target) => ({ key: target, asset: updaterAsset(target, naming, version) }))
   for (const target of targets) {
     for (const entry of installerEntries(target, naming, version)) {
-      if (sigFiles.has(stored.get(`${entry.asset}.sig`) ?? `${entry.asset}.sig`)) wanted.push(entry)
+      if (sigFiles.has(storedName(stored, `${entry.asset}.sig`))) wanted.push(entry)
     }
   }
   const wantedKeys = wanted.map((entry) => entry.key)
@@ -371,12 +391,12 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
     const entry = platforms[target]
     if (!entry) continue
     // The URL must use the name GitHub serves the file under.
-    const asset = stored.get(uploaded) ?? uploaded
+    const asset = storedName(stored, uploaded)
     const url = String(entry.url ?? '')
     if (!url.startsWith(downloadBase)) out.urls.push(`${target}: ${url || '(none)'} is not under ${downloadBase}`)
     else if (decodeURIComponent(url.slice(downloadBase.length)) !== asset) out.urls.push(`${target}: points at ${url.slice(downloadBase.length)}, expected ${asset}`)
 
-    const sigName = stored.get(`${uploaded}.sig`) ?? `${uploaded}.sig`
+    const sigName = storedName(stored, `${uploaded}.sig`)
     const sigFile = sigFiles.get(sigName)
     if (sigFile === undefined) out.signatures.push(`${target}: ${sigName} is not on the release`)
     else if (entry.signature !== sigFile) out.signatures.push(`${target}: signature differs from ${sigName}`)

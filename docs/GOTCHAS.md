@@ -190,6 +190,19 @@ re-read this first.
   only needed when you want the app-repo tag to point at the fixed commit.
   A tag whose release already went PUBLIC is never reused — bump instead.
 
+- **An asset's label is not its upload name once the kit has labelled it.**
+  tauri-action records the name it uploaded as the asset's label, and
+  verify-release read the label as that name. The checksums job then relabels
+  every asset with a readable one ("macOS (Intel) · disk image"), before
+  verification, so the first full release on that kit version failed with
+  every asset both "missing" and "unexpected". verify-release now treats the
+  kit's own label as no label and matches by the name GitHub stored, with the
+  expected name put through GitHub's renaming. To check a draft without paying
+  for a run: `node scripts/verify-release.mjs release --repo <releases repo>
+  --tag vX.Y.Z --src-tauri <dir at the tag> --targets <keys>` with `GH_TOKEN`
+  set. There is no build-free re-run: a retry must rebuild at least one leg,
+  so pick the cheapest (`build_targets=darwin-x86_64` on a self-hosted Mac).
+
 - **The rolling `latest-<channel>` releases create git tags, and a version
   tool that reads "the last tag" will pick one up.** `repos.createRelease`
   with a `tag_name` that does not exist creates the tag, so `latest-alpha`

@@ -15,6 +15,7 @@ import {
   checksumAssets,
   repairPlan,
   compareAssets,
+  storedName,
   expectedAssets,
   installerEntries,
   loadAppNaming,
@@ -50,6 +51,35 @@ test('uploadName prefers the label tauri-action records', () => {
   assert.equal(uploadName({ name: 'My.App_1.0.0_x64.dmg', label: 'My App_1.0.0_x64.dmg' }), 'My App_1.0.0_x64.dmg')
   assert.equal(uploadName({ name: 'latest.json', label: '' }), 'latest.json')
   assert.equal(uploadName({ name: 'SHA256SUMS', label: null }), 'SHA256SUMS')
+})
+
+// The checksums job relabels every asset before verify-release runs (label-assets.sh). Reading
+// that readable label as the upload name failed a whole release: 23 "missing", 27 "unexpected".
+test('an asset carrying the kit\'s readable label is known by its stored name', () => {
+  assert.equal(uploadName({ name: 'MyApp_1.0.0_x64.dmg', label: 'macOS (Intel) · disk image' }), 'MyApp_1.0.0_x64.dmg')
+  assert.equal(uploadName({ name: 'latest.json', label: 'Update manifest' }), 'latest.json')
+  assert.equal(uploadName({ name: 'SHA256SUMS', label: 'Checksums (SHA-256)' }), 'SHA256SUMS')
+  // Any other label is still an upload name.
+  assert.equal(uploadName({ name: 'My.App_1.0.0_x64.dmg', label: 'My App_1.0.0_x64.dmg' }), 'My App_1.0.0_x64.dmg')
+})
+
+test('a relabelled asset whose upload name GitHub renamed still matches what was expected', () => {
+  const expected = { required: ['My App_1.0.0_x64.dmg', 'latest.json'], optional: ['My App_1.0.0_x64.msi'] }
+  const present = [
+    uploadName({ name: 'My.App_1.0.0_x64.dmg', label: 'macOS (Intel) · disk image' }),
+    uploadName({ name: 'latest.json', label: 'Update manifest' }),
+    uploadName({ name: 'My.App_1.0.0_x64.msi', label: 'Windows (x64) · MSI installer' }),
+  ]
+  assert.deepEqual(compareAssets(present, expected), { missing: [], unexpected: [] })
+  assert.deepEqual(compareAssets(['My.App_1.0.0_x64.dmg', 'stray.zip'], expected), {
+    missing: ['latest.json'],
+    unexpected: ['stray.zip'],
+  })
+
+  const stored = new Map([['My.App_1.0.0_x64.dmg', 'My.App_1.0.0_x64.dmg']])
+  assert.equal(storedName(stored, 'My App_1.0.0_x64.dmg'), 'My.App_1.0.0_x64.dmg')
+  assert.equal(storedName(new Map([['My App_1.0.0_x64.dmg', 'My.App_1.0.0_x64.dmg']]), 'My App_1.0.0_x64.dmg'), 'My.App_1.0.0_x64.dmg')
+  assert.equal(storedName(new Map(), 'gone.dmg'), 'gone.dmg')
 })
 
 test('cargoPackageName reads only the [package] table', () => {
