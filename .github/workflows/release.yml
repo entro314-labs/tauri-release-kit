@@ -1051,15 +1051,26 @@ jobs:
         working-directory: ${{ inputs.project_path }}/src-tauri
         run: cargo fmt --all -- --check
 
-      # shell: bash - this step reads $TARGET, and the default shell on the Windows
-      # legs is PowerShell, where "$TARGET" is an unset PowerShell variable and
-      # cargo gets `--target ""` ("error: target was empty").
+      # Two steps, one per shell, because neither spelling works in both. The
+      # Windows legs default to PowerShell, where "$TARGET" is an unset PowerShell
+      # variable and cargo gets `--target ""` ("error: target was empty"). Running
+      # the Windows legs under bash instead puts Git's MSYS perl first on PATH,
+      # and that perl cannot configure a vendored OpenSSL (openssl-sys fails with
+      # "Can't locate Locale/Maketext/Simple.pm").
       - name: Rust clippy check
+        if: matrix.os_name != 'windows'
         working-directory: ${{ inputs.project_path }}/src-tauri
-        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: cargo clippy --target "$TARGET" -- -D warnings
+
+      - name: Rust clippy check (Windows)
+        if: matrix.os_name == 'windows'
+        working-directory: ${{ inputs.project_path }}/src-tauri
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo clippy --target "$env:TARGET" -- -D warnings
 
       # Materialize the App Store Connect API key (.p8) for notarization.
       # Stored base64 so it survives the GitHub secrets UI. No-op when unset.

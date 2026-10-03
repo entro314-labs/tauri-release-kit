@@ -14,6 +14,15 @@ re-read this first.
   `components:` to the ACTION only fixes the stable toolchain it installs,
   not the pinned one cargo actually uses.
 
+- **A step that reads an env var needs one spelling per shell on the Windows
+  legs.** Their default shell is PowerShell: `"$TARGET"` is an unset PowerShell
+  variable there, so cargo gets `--target ""` ("error: target was empty").
+  Forcing `shell: bash` on those legs is not the fix: Git Bash puts its MSYS
+  perl ahead of Strawberry Perl, and that perl cannot configure a vendored
+  OpenSSL (`openssl-sys` fails with "Can't locate Locale/Maketext/Simple.pm").
+  The clippy gate is therefore two steps, `"$TARGET"` off Windows and
+  `"$env:TARGET"` under `pwsh` on it. Both failures cost a release run each.
+
 - **A Mac cannot pre-verify Linux/Windows gates.** Four classes of diagnostics
   only appear off-macOS: (1) Apple-only crates compiled for non-Apple targets,
   (2) `build.rs` unused-imports when the *host* isn't macOS (build scripts
