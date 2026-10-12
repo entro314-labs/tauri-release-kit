@@ -63,6 +63,15 @@ test('Homebrew paths in a sidecar, a framework and a resource dylib are all repo
   assert.match(r.out, /liby\.dylib links \/usr\/local\/lib\/libz/)
 })
 
+test('resource dylibs are scanned even when the bundle has no Frameworks directory', () => {
+  const r = check(bundle({
+    'Contents/MacOS/my-app': SYSTEM,
+    'Contents/Resources/resources/libfoo.dylib': '/opt/homebrew/lib/libbar.dylib\n',
+  }))
+  assert.equal(r.code, 1, r.out)
+  assert.match(r.out, /Contents\/Resources\/resources\/libfoo\.dylib links \/opt\/homebrew\/lib\/libbar\.dylib/)
+})
+
 test('a bundle with no Mach-O files, or no bundle, is an error', () => {
   assert.equal(check(bundle({ 'Contents/MacOS/run.sh': '#!/bin/sh\n' })).code, 1)
   const r = spawnSync('bash', [script, '/nonexistent.app'], { encoding: 'utf8' })

@@ -44,9 +44,11 @@ while IFS= read -r -d '' FILE; do
   fi
 done < <(
   {
-    find "$APP/Contents/MacOS" -type f -print0 2>/dev/null
-    find "$APP/Contents/Frameworks" -type f -print0 2>/dev/null
-    find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -not -path "$APP/Contents/MacOS/*" -not -path "$APP/Contents/Frameworks/*" -print0 2>/dev/null
+    # `|| true` on each: under `set -e` a missing directory (most bundles have
+    # no Contents/Frameworks) would otherwise end the list before the next find.
+    find "$APP/Contents/MacOS" -type f -print0 2>/dev/null || true
+    find "$APP/Contents/Frameworks" -type f -print0 2>/dev/null || true
+    find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -not -path "$APP/Contents/MacOS/*" -not -path "$APP/Contents/Frameworks/*" -print0 2>/dev/null || true
   }
 )
 
