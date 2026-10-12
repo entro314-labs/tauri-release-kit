@@ -89,6 +89,58 @@ test('linux: a bundle format in the list with no file fails; unlisted formats ar
   assert.equal(run('smoke-linux.sh', [dir], { bin }).code, 2)
 })
 
+// An rpm fixture whose content is the Requires list the `rpm` stub prints for it.
+function rpmBundle(root, requires) {
+  const dir = join(root, 'bundle')
+  mkdirSync(join(dir, 'rpm'), { recursive: true })
+  if (requires !== null) writeFileSync(join(dir, 'rpm', 'App-1.2.3-1.x86_64.rpm'), requires)
+  return dir
+}
+
+function rpmStubs(bin, dockerBody = 'exit 0') {
+  exe(join(bin, 'rpm'), '[ "$1" = -qp ] && [ "$2" = --requires ] && cat "$3"')
+  exe(join(bin, 'docker'), dockerBody)
+}
+
+const SONAMES = 'libwebkit2gtk-4.1.so.0()(64bit)\nlibgtk-3.so.0()(64bit)\nrpmlib(FileDigests)\n'
+const REQUIRED = 'libwebkit2gtk-4.1.so.0()(64bit), libgtk-3.so.0()(64bit)'
+
+test('linux: an rpm declaring every required capability passes', () => {
+  const { root, bin } = sandbox()
+  rpmStubs(bin)
+  const r = run('smoke-linux.sh', [rpmBundle(root, SONAMES), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /declares every required capability/)
+})
+
+test('linux: a missing Requires and a missing rpm are reported once rpm checks are configured', () => {
+  const { root, bin } = sandbox()
+  rpmStubs(bin)
+  const r = run('smoke-linux.sh', [rpmBundle(root, 'libgtk-3.so.0()(64bit)\n'), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /does not declare Requires: libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)/)
+  assert.doesNotMatch(r.out, /Requires: libgtk/)
+  const empty = run('smoke-linux.sh', [rpmBundle(mkdtempSync(join(tmpdir(), 'rk-rpm-')), null), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(empty.code, 1)
+  assert.match(empty.out, /no \.rpm/)
+})
+
+test('linux: the clean-container install passes or prints what did not resolve', () => {
+  const { root, bin } = sandbox()
+  // The stub sees the image and the rpm path the script mounts.
+  rpmStubs(bin, '[ "$1" = run ] && printf "%s\\n" "$@" | grep -qx "fedora:43" && printf "%s\\n" "$@" | grep -qx "/pkg/App-1.2.3-1.x86_64.rpm"')
+  const ok = run('smoke-linux.sh', [rpmBundle(root, SONAMES), '1.2.3', 'rpm'], { bin, env: { RPM_INSTALL_IMAGE: 'fedora:43' } })
+  assert.equal(ok.code, 0, ok.out)
+  assert.match(ok.out, /installs on a clean fedora:43 and every library resolves/)
+
+  const broken = sandbox()
+  rpmStubs(broken.bin, 'echo "/usr/bin/app:"; echo "  libayatana-appindicator3.so.1 => not found"; exit 1')
+  const r = run('smoke-linux.sh', [rpmBundle(broken.root, SONAMES), '1.2.3', 'rpm'], { bin: broken.bin, env: { RPM_INSTALL_IMAGE: 'fedora:43' } })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /failed a clean install on fedora:43/)
+  assert.match(r.out, /libayatana-appindicator3\.so\.1 => not found/)
+})
+
 function macBundle(root, appBody) {
   const dir = join(root, 'bundle')
   const contents = join(dir, 'macos', 'My App.app', 'Contents')

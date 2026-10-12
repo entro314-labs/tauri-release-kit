@@ -327,6 +327,25 @@ on:
         required: false
         type: boolean
         default: false
+      rpm_requires:
+        description: >-
+          Comma-separated capabilities every .rpm must declare as Requires
+          (`rpm -qp --requires`), checked by smoke_test on the Linux legs,
+          e.g. 'libwebkit2gtk-4.1.so.0()(64bit),libgtk-3.so.0()(64bit)'.
+          Empty (the default) skips the check.
+        required: false
+        type: string
+        default: ''
+      rpm_install_image:
+        description: >-
+          Container image (e.g. 'fedora:43') in which smoke_test installs
+          each .rpm with dnf on a clean system and fails when an installed
+          executable or library has an unresolved dependency (`ldd -r`).
+          Native-arch Linux legs only; needs docker on the runner. Empty
+          (the default) skips it.
+        required: false
+        type: string
+        default: ''
       webdriver_smoke:
         description: >-
           A command that checks the built app's UI through WebDriver on the
@@ -1585,6 +1604,8 @@ jobs:
           BUNDLES: ${{ matrix.bundles }}
           VERSION: ${{ needs.check-changelog.outputs.version }}
           BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+          RPM_REQUIRES: ${{ inputs.rpm_requires }}
+          RPM_INSTALL_IMAGE: ${{ inputs.rpm_install_image }}
         run: |
           set -euo pipefail
           case "${RUNNER_ARCH}/${ARCH}" in
@@ -1598,6 +1619,8 @@ jobs:
           case "$OS_NAME" in
             linux)
               sudo apt-get install -y xvfb xauth
+              # `rpm -qp` for rpm_requires (the image's own rpm does the install check).
+              if [ -n "$RPM_REQUIRES" ]; then sudo apt-get install -y rpm; fi
               bash .release-kit/scripts/smoke-linux.sh "$BUNDLE_DIR" "$BARE" "$BUNDLES"
               ;;
             darwin)

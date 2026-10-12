@@ -9,6 +9,14 @@
 # library, a panic in setup code, a WebKitGTK that cannot initialise).
 #
 # - deb: `dpkg-deb -f <deb> Version` must equal the release version.
+# - rpm (only when RPM_REQUIRES or RPM_INSTALL_IMAGE is set - otherwise the rpm
+#   is not looked at): every capability in the comma-separated RPM_REQUIRES must
+#   be listed by `rpm -qp --requires` (the bundler derives soname Requires such
+#   as `libwebkit2gtk-4.1.so.0()(64bit)`; an rpm without them installs on a
+#   machine that cannot run it). With RPM_INSTALL_IMAGE (e.g. fedora:43) each
+#   .rpm is also `dnf install`ed in a fresh container of that image - no dev
+#   packages - and every installed executable or shared object must resolve all
+#   its libraries: no "not found" from `ldd -r`.
 # - appimage: extracted (no FUSE needed) and launched under Xvfb; it must still
 #   be running after SMOKE_SECONDS (default 15; overridable for the tests), i.e.
 #   `timeout` must be what ends it (exit 124), and its output must not contain
@@ -45,6 +53,75 @@ case "$BUNDLES" in *,deb,*)
   if [ "$FOUND" = 0 ]; then
     echo "::error::deb is in this leg's bundle list but there is no .deb under ${BUNDLE_DIR}/deb"
     FAIL=1
+  fi
+;; esac
+
+RPM_REQUIRES="${RPM_REQUIRES:-}"
+RPM_INSTALL_IMAGE="${RPM_INSTALL_IMAGE:-}"
+# Runs inside the container as `sh -c "$RPM_INSTALL_SCRIPT" sh <rpm>`.
+# shellcheck disable=SC2016 # expanded by the container's sh, not here
+RPM_INSTALL_SCRIPT='set -eu
+if ! dnf -y -q install "$1" >/tmp/dnf.log 2>&1; then
+  cat /tmp/dnf.log
+  echo "dnf could not install $1"
+  exit 1
+fi
+rpm -qlp "$1" >/tmp/files
+missing=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  case "$f" in *.so|*.so.*) ;; *) [ -x "$f" ] || continue ;; esac
+  unresolved="$(ldd -r "$f" 2>&1 | grep "not found" || true)"
+  if [ -n "$unresolved" ]; then
+    printf "%s:\n%s\n" "$f" "$unresolved"
+    missing=1
+  fi
+done </tmp/files
+exit "$missing"'
+
+case "$BUNDLES" in *,rpm,*)
+  if [ -n "$RPM_REQUIRES" ] || [ -n "$RPM_INSTALL_IMAGE" ]; then
+    FOUND=0
+    while IFS= read -r -d '' RPM; do
+      FOUND=1
+      NAME="$(basename "$RPM")"
+      if [ -n "$RPM_REQUIRES" ]; then
+        DECLARED="$(rpm -qp --requires "$RPM")"
+        MISSING=0
+        IFS=',' read -r -a CAPS <<<"$RPM_REQUIRES"
+        for CAP in "${CAPS[@]}"; do
+          CAP="${CAP#"${CAP%%[![:space:]]*}"}"
+          CAP="${CAP%"${CAP##*[![:space:]]}"}"
+          [ -n "$CAP" ] || continue
+          if ! grep -qxF -- "$CAP" <<<"$DECLARED"; then
+            echo "::error::${NAME} does not declare Requires: ${CAP}"
+            MISSING=1
+            FAIL=1
+          fi
+        done
+        if [ "$MISSING" = 0 ]; then
+          echo "rpm: ${NAME} declares every required capability"
+        fi
+      fi
+      if [ -n "$RPM_INSTALL_IMAGE" ]; then
+        RPM_DIR="$(cd "$(dirname "$RPM")" && pwd)"
+        set +e
+        OUT="$(docker run --rm -v "${RPM_DIR}:/pkg:ro" "$RPM_INSTALL_IMAGE" sh -c "$RPM_INSTALL_SCRIPT" sh "/pkg/${NAME}" 2>&1)"
+        STATUS=$?
+        set -e
+        if [ "$STATUS" -ne 0 ]; then
+          echo "::error::${NAME} failed a clean install on ${RPM_INSTALL_IMAGE} (status ${STATUS}):"
+          echo "$OUT"
+          FAIL=1
+        else
+          echo "rpm: ${NAME} installs on a clean ${RPM_INSTALL_IMAGE} and every library resolves"
+        fi
+      fi
+    done < <(find "$BUNDLE_DIR/rpm" -maxdepth 1 -name '*.rpm' -print0 2>/dev/null)
+    if [ "$FOUND" = 0 ]; then
+      echo "::error::rpm checks are configured but there is no .rpm under ${BUNDLE_DIR}/rpm"
+      FAIL=1
+    fi
   fi
 ;; esac
 
