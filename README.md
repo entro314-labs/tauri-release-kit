@@ -451,6 +451,19 @@ without a display, needs first-run setup, or single-instances itself fails
 it for reasons that are not bugs; turn it on once your app starts cleanly on
 a bare runner. The logic lives in [`scripts/smoke-*`](scripts/).
 
+### Sidecar version check (opt-in)
+
+Binaries other programs are pointed at - an MCP server, a CLI - can go
+missing from a bundle or ship stale, and the app's own launch never notices.
+With `smoke_test` on, `sidecar_binaries` runs each listed file with
+`--version` in the extracted deb and AppImage (`usr/bin/`) and in the `.app`
+(`Contents/MacOS/`); the last output line must equal the release version or
+end in ` <version>`. Windows legs are not covered yet.
+
+```yaml
+      sidecar_binaries: 'my-mcp'
+```
+
 ### rpm checks (opt-in)
 
 An rpm that declares no `Requires` for the libraries it links installs on

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package smoke test for a macOS build leg (release.yml, `smoke_test: true`).
 #
-#   smoke-macos.sh <bundle dir> <bundles csv>
+#   smoke-macos.sh <bundle dir> <bundles csv> [<version>]
 #
 # - dmg: `hdiutil verify` checks the image's internal checksum — a truncated or
 #   corrupt DMG fails here instead of on a user's "image not recognized".
@@ -9,17 +9,23 @@
 #   and must still be running after SMOKE_SECONDS (default 10; overridable for
 #   the tests). A dyld error ("Library not loaded"), a panic in setup code or
 #   a crash on launch ends it early; its output is printed.
+# - sidecars (only when SIDECARS, a comma-separated list of file names, is
+#   set; needs <version>): each must sit in the .app's Contents/MacOS and
+#   report the release version from --version (check-sidecar-version.sh).
 #
 # Every failure is reported before exiting non-zero.
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <bundle dir> <bundles csv>" >&2
+SIDECARS="${SIDECARS:-}"
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ] || { [ -n "$SIDECARS" ] && [ "$#" -ne 3 ]; }; then
+  echo "usage: $0 <bundle dir> <bundles csv> [<version>]  (the version is required with SIDECARS)" >&2
   exit 2
 fi
 BUNDLE_DIR="$1"
 BUNDLES=",$2,"
+VERSION="${3:-}"
 ALIVE="${SMOKE_SECONDS:-10}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 FAIL=0
 
 case "$BUNDLES" in *,dmg,*)
@@ -46,6 +52,14 @@ case "$BUNDLES" in *,app,*)
     FAIL=1
   else
     EXE="$(plutil -extract CFBundleExecutable raw -o - "$APP/Contents/Info.plist")"
+    if [ -n "$SIDECARS" ]; then
+      IFS=',' read -r -a NAMES <<<"$SIDECARS"
+      for NAME in "${NAMES[@]}"; do
+        NAME="${NAME//[[:space:]]/}"
+        [ -n "$NAME" ] || continue
+        bash "$HERE/check-sidecar-version.sh" "$APP/Contents/MacOS/$NAME" "$VERSION" "app $(basename "$APP")" || FAIL=1
+      done
+    fi
     LOG="$(mktemp "${RUNNER_TEMP:-/tmp}/app-smoke.XXXXXX")"
     "$APP/Contents/MacOS/$EXE" >"$LOG" 2>&1 &
     PID=$!

@@ -345,6 +345,17 @@ on:
         required: false
         type: boolean
         default: false
+      sidecar_binaries:
+        description: >-
+          Comma-separated file names of extra binaries the bundles ship beside
+          the app (e.g. 'my-mcp'), checked by smoke_test on the Linux (deb,
+          AppImage) and macOS (.app) legs: each must be present and its
+          `--version` must print the release version (the last output line
+          equal to it, or ending in ' <version>'). Empty (the default) skips
+          it.
+        required: false
+        type: string
+        default: ''
       rpm_requires:
         description: >-
           Comma-separated capabilities every .rpm must declare as Requires
@@ -1627,6 +1638,7 @@ jobs:
           BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
           RPM_REQUIRES: ${{ inputs.rpm_requires }}
           RPM_INSTALL_IMAGE: ${{ inputs.rpm_install_image }}
+          SIDECARS: ${{ inputs.sidecar_binaries }}
         run: |
           set -euo pipefail
           case "${RUNNER_ARCH}/${ARCH}" in
@@ -1645,7 +1657,7 @@ jobs:
               bash .release-kit/scripts/smoke-linux.sh "$BUNDLE_DIR" "$BARE" "$BUNDLES"
               ;;
             darwin)
-              bash .release-kit/scripts/smoke-macos.sh "$BUNDLE_DIR" "$BUNDLES"
+              bash .release-kit/scripts/smoke-macos.sh "$BUNDLE_DIR" "$BUNDLES" "$BARE"
               ;;
             windows)
               pwsh -NoProfile -File .release-kit/scripts/smoke-windows.ps1 -BundleDir "$BUNDLE_DIR" -Version "$BARE" -Bundles "$BUNDLES"

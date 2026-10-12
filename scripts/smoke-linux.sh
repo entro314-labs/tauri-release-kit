@@ -20,7 +20,10 @@
 # - appimage: extracted (no FUSE needed) and launched under Xvfb; it must still
 #   be running after SMOKE_SECONDS (default 15; overridable for the tests), i.e.
 #   `timeout` must be what ends it (exit 124), and its output must not contain
-#   a panic or a dynamic-linker error. GDK_BACKEND=x11 because Xvfb is an X
+#   a panic or a dynamic-linker error.
+# - sidecars (only when SIDECARS, a comma-separated list of file names, is
+#   set): each must sit in usr/bin of the extracted deb and AppImage and
+#   report the release version from --version (check-sidecar-version.sh). GDK_BACKEND=x11 because Xvfb is an X
 #   server; WEBKIT_DISABLE_DMABUF_RENDERER=1 because WebKitGTK's DMA-BUF
 #   renderer fails EGL initialisation on GPU-less runners and exits, which
 #   would fail every run for a reason no user machine shares.
@@ -36,7 +39,21 @@ BUNDLE_DIR="$1"
 VERSION="$2"
 BUNDLES=",$3,"
 ALIVE="${SMOKE_SECONDS:-15}"
+SIDECARS="${SIDECARS:-}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 FAIL=0
+
+# check_sidecars <root of an extracted package> <label>: every SIDECARS entry in <root>/usr/bin.
+check_sidecars() {
+  local root="$1" label="$2" name
+  local -a names
+  IFS=',' read -r -a names <<<"$SIDECARS"
+  for name in "${names[@]}"; do
+    name="${name//[[:space:]]/}"
+    [ -n "$name" ] || continue
+    bash "$HERE/check-sidecar-version.sh" "$root/usr/bin/$name" "$VERSION" "$label" || FAIL=1
+  done
+}
 
 case "$BUNDLES" in *,deb,*)
   FOUND=0
@@ -48,6 +65,11 @@ case "$BUNDLES" in *,deb,*)
     else
       echo "::error::$(basename "$DEB") declares Version '${GOT}', expected '${VERSION}'"
       FAIL=1
+    fi
+    if [ -n "$SIDECARS" ]; then
+      EXTRACTED="$(mktemp -d "${RUNNER_TEMP:-/tmp}/deb-smoke.XXXXXX")"
+      dpkg-deb -x "$DEB" "$EXTRACTED"
+      check_sidecars "$EXTRACTED" "deb $(basename "$DEB")"
     fi
   done < <(find "$BUNDLE_DIR/deb" -maxdepth 1 -name '*.deb' -print0 2>/dev/null)
   if [ "$FOUND" = 0 ]; then
@@ -134,6 +156,9 @@ case "$BUNDLES" in *,appimage,*)
     APPIMAGE="$(cd "$(dirname "$APPIMAGE")" && pwd)/$(basename "$APPIMAGE")"
     WORK="$(mktemp -d "${RUNNER_TEMP:-/tmp}/appimage-smoke.XXXXXX")"
     (cd "$WORK" && "$APPIMAGE" --appimage-extract >/dev/null)
+    if [ -n "$SIDECARS" ]; then
+      check_sidecars "$WORK/squashfs-root" "appimage $(basename "$APPIMAGE")"
+    fi
     set +e
     (cd "$WORK" && GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 \
       timeout "${ALIVE}s" xvfb-run -a ./squashfs-root/AppRun >startup.log 2>&1)
