@@ -32,9 +32,16 @@ function bundle(files) {
   return { app, bin }
 }
 
-function check({ app, bin }) {
-  const r = spawnSync('bash', [script, app], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } })
+function check({ app, bin }, env = {}) {
+  const r = spawnSync('bash', [script, app], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env } })
   return { code: r.status, out: r.stdout + r.stderr }
+}
+
+// `lipo -archs` stub: a fake Mach-O whose content names `@arch <archs>` on a line reports those,
+// anything else is arm64.
+function withLipo(fixture) {
+  exe(join(fixture.bin, 'lipo'), '[ "$1" = -archs ] || exit 9; a="$(sed -n "s/^@arch //p" "$2")"; echo "${a:-arm64}"')
+  return fixture
 }
 
 const SYSTEM = '/usr/lib/libSystem.B.dylib\n/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit\n@rpath/libbundled.dylib\n'
@@ -76,4 +83,30 @@ test('a bundle with no Mach-O files, or no bundle, is an error', () => {
   assert.equal(check(bundle({ 'Contents/MacOS/run.sh': '#!/bin/sh\n' })).code, 1)
   const r = spawnSync('bash', [script, '/nonexistent.app'], { encoding: 'utf8' })
   assert.equal(r.status, 2)
+})
+
+test('without EXPECTED_ARCH no architecture is checked', () => {
+  const r = check(withLipo(bundle({ 'Contents/MacOS/my-app': `${SYSTEM}@arch arm64\n` })))
+  assert.equal(r.code, 0, r.out)
+  assert.doesNotMatch(r.out, /Architecture/)
+})
+
+test('a file lacking the leg architecture fails unless allowlisted; universal files pass', () => {
+  const files = {
+    'Contents/MacOS/my-app': `${SYSTEM}@arch x86_64\n`,
+    'Contents/MacOS/sidecar': `${SYSTEM}@arch x86_64 arm64\n`,
+    'Contents/Resources/resources/libthin.dylib': '@arch arm64\n',
+  }
+  const r = check(withLipo(bundle(files)), { EXPECTED_ARCH: 'x86_64' })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /Contents\/Resources\/resources\/libthin\.dylib is built for 'arm64', not x86_64/)
+  assert.doesNotMatch(r.out, /my-app is built for|sidecar is built for/)
+
+  const allowed = check(withLipo(bundle(files)), {
+    EXPECTED_ARCH: 'x86_64',
+    ARCH_ALLOWLIST: ' Contents/Other.dylib ,\nContents/Resources/resources/libthin.dylib\n',
+  })
+  assert.equal(allowed.code, 0, allowed.out)
+  assert.match(allowed.out, /libthin\.dylib is allowlisted/)
+  assert.match(allowed.out, /Architecture OK: every checked file includes x86_64/)
 })

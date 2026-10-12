@@ -424,6 +424,15 @@ the only legitimate reason is an app that is distributed exclusively in a way
 that guarantees the formula is installed (a Homebrew cask with
 `depends_on formula:`).
 
+`macos_arch_check: true` additionally requires every one of those files to
+include the leg's architecture (`lipo -archs`; universal files pass). The
+Intel leg usually cross-builds on an Apple Silicon runner and its smoke
+launch, if any, runs under Rosetta, so a thin arm64 dylib or sidecar in the
+x86_64 bundle otherwise ships unnoticed and fails to load on Intel Macs.
+Files that are never loaded on the other architecture can be exempted with
+`macos_arch_allowlist` (paths relative to the `.app`, comma- or
+newline-separated).
+
 ## Package smoke tests (opt-in)
 
 `smoke_test: true` installs and launches what each leg built, on every leg
