@@ -89,6 +89,58 @@ test('linux: a bundle format in the list with no file fails; unlisted formats ar
   assert.equal(run('smoke-linux.sh', [dir], { bin }).code, 2)
 })
 
+// An rpm fixture whose content is the Requires list the `rpm` stub prints for it.
+function rpmBundle(root, requires) {
+  const dir = join(root, 'bundle')
+  mkdirSync(join(dir, 'rpm'), { recursive: true })
+  if (requires !== null) writeFileSync(join(dir, 'rpm', 'App-1.2.3-1.x86_64.rpm'), requires)
+  return dir
+}
+
+function rpmStubs(bin, dockerBody = 'exit 0') {
+  exe(join(bin, 'rpm'), '[ "$1" = -qp ] && [ "$2" = --requires ] && cat "$3"')
+  exe(join(bin, 'docker'), dockerBody)
+}
+
+const SONAMES = 'libwebkit2gtk-4.1.so.0()(64bit)\nlibgtk-3.so.0()(64bit)\nrpmlib(FileDigests)\n'
+const REQUIRED = 'libwebkit2gtk-4.1.so.0()(64bit), libgtk-3.so.0()(64bit)'
+
+test('linux: an rpm declaring every required capability passes', () => {
+  const { root, bin } = sandbox()
+  rpmStubs(bin)
+  const r = run('smoke-linux.sh', [rpmBundle(root, SONAMES), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /declares every required capability/)
+})
+
+test('linux: a missing Requires and a missing rpm are reported once rpm checks are configured', () => {
+  const { root, bin } = sandbox()
+  rpmStubs(bin)
+  const r = run('smoke-linux.sh', [rpmBundle(root, 'libgtk-3.so.0()(64bit)\n'), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /does not declare Requires: libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)/)
+  assert.doesNotMatch(r.out, /Requires: libgtk/)
+  const empty = run('smoke-linux.sh', [rpmBundle(mkdtempSync(join(tmpdir(), 'rk-rpm-')), null), '1.2.3', 'rpm'], { bin, env: { RPM_REQUIRES: REQUIRED } })
+  assert.equal(empty.code, 1)
+  assert.match(empty.out, /no \.rpm/)
+})
+
+test('linux: the clean-container install passes or prints what did not resolve', () => {
+  const { root, bin } = sandbox()
+  // The stub sees the image and the rpm path the script mounts.
+  rpmStubs(bin, '[ "$1" = run ] && printf "%s\\n" "$@" | grep -qx "fedora:43" && printf "%s\\n" "$@" | grep -qx "/pkg/App-1.2.3-1.x86_64.rpm"')
+  const ok = run('smoke-linux.sh', [rpmBundle(root, SONAMES), '1.2.3', 'rpm'], { bin, env: { RPM_INSTALL_IMAGE: 'fedora:43' } })
+  assert.equal(ok.code, 0, ok.out)
+  assert.match(ok.out, /installs on a clean fedora:43 and every library resolves/)
+
+  const broken = sandbox()
+  rpmStubs(broken.bin, 'echo "/usr/bin/app:"; echo "  libayatana-appindicator3.so.1 => not found"; exit 1')
+  const r = run('smoke-linux.sh', [rpmBundle(broken.root, SONAMES), '1.2.3', 'rpm'], { bin: broken.bin, env: { RPM_INSTALL_IMAGE: 'fedora:43' } })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /failed a clean install on fedora:43/)
+  assert.match(r.out, /libayatana-appindicator3\.so\.1 => not found/)
+})
+
 function macBundle(root, appBody) {
   const dir = join(root, 'bundle')
   const contents = join(dir, 'macos', 'My App.app', 'Contents')
@@ -123,5 +175,73 @@ test('macos: corrupt dmg and a crashing app are both reported with the app outpu
   assert.equal(r.code, 1)
   assert.match(r.out, /hdiutil verify failed/)
   assert.match(r.out, /exited during startup \(status 134\)/)
+  assert.match(r.out, /Library not loaded/)
+})
+
+// A deb and an AppImage that both carry `sidecar` in usr/bin, printing `versionOutput`. The
+// dpkg-deb stub's `-x` copies the `<deb>.root` fixture tree.
+function sidecarLinuxBundle(root, versionOutput, { inDeb = true } = {}) {
+  const dir = linuxBundle(root, {
+    appRun: 'sleep 30',
+  })
+  const deb = join(dir, 'deb', 'App_1.2.3_amd64.deb')
+  if (inDeb) {
+    mkdirSync(`${deb}.root/usr/bin`, { recursive: true })
+    exe(`${deb}.root/usr/bin/sidecar`, `echo ${JSON.stringify(versionOutput)}`)
+  }
+  exe(join(dir, 'appimage', 'App_1.2.3_amd64.AppImage'), `
+[ "$1" = --appimage-extract ] || exit 99
+mkdir -p squashfs-root/usr/bin
+printf '#!/usr/bin/env bash\\nsleep 30\\n' > squashfs-root/AppRun
+printf '#!/usr/bin/env bash\\necho %s\\n' ${JSON.stringify(JSON.stringify(versionOutput))} > squashfs-root/usr/bin/sidecar
+chmod +x squashfs-root/AppRun squashfs-root/usr/bin/sidecar`)
+  return dir
+}
+
+function sidecarLinuxStubs(bin) {
+  exe(join(bin, 'dpkg-deb'), `
+if [ "$1" = -x ]; then [ -d "$2.root" ] && cp -R "$2.root/." "$3"; exit 0; fi
+[ "$1" = -f ] && [ "$3" = Version ] && echo 1.2.3`)
+  exe(join(bin, 'xvfb-run'), '[ "$1" = -a ] && shift; exec "$@"')
+}
+
+test('linux: sidecars in the deb and the AppImage reporting the release version pass', () => {
+  const { root, bin } = sandbox()
+  sidecarLinuxStubs(bin)
+  const r = run('smoke-linux.sh', [sidecarLinuxBundle(root, 'sidecar 1.2.3'), '1.2.3', 'deb,appimage'], { bin, env: { SIDECARS: 'sidecar' } })
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /deb App_1\.2\.3_amd64\.deb: sidecar sidecar reports 1\.2\.3/)
+  assert.match(r.out, /appimage App_1\.2\.3_amd64\.AppImage: sidecar sidecar reports 1\.2\.3/)
+})
+
+test('linux: a sidecar missing from the deb and a stale one in the AppImage both fail', () => {
+  const { root, bin } = sandbox()
+  sidecarLinuxStubs(bin)
+  const r = run('smoke-linux.sh', [sidecarLinuxBundle(root, '1.2.2', { inDeb: false }), '1.2.3', 'deb,appimage'], { bin, env: { SIDECARS: 'sidecar' } })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /deb App_1\.2\.3_amd64\.deb: sidecar sidecar is missing or not executable/)
+  assert.match(r.out, /sidecar --version printed '1\.2\.2', expected 1\.2\.3/)
+})
+
+test('macos: a sidecar beside the app executable is checked; SIDECARS needs the version', () => {
+  const { root, bin } = sandbox()
+  macStubs(bin)
+  const dir = macBundle(root, 'sleep 30')
+  exe(join(dir, 'macos', 'My App.app', 'Contents', 'MacOS', 'my-mcp'), 'echo 1.2.3')
+  const ok = run('smoke-macos.sh', [dir, 'app', '1.2.3'], { bin, env: { SIDECARS: 'my-mcp' } })
+  assert.equal(ok.code, 0, ok.out)
+  assert.match(ok.out, /app My App\.app: sidecar my-mcp reports 1\.2\.3/)
+  const stale = run('smoke-macos.sh', [dir, 'app', '1.3.0'], { bin, env: { SIDECARS: 'my-mcp' } })
+  assert.equal(stale.code, 1)
+  assert.match(stale.out, /printed '1\.2\.3', expected 1\.3\.0/)
+  assert.equal(run('smoke-macos.sh', [dir, 'app'], { bin, env: { SIDECARS: 'my-mcp' } }).code, 2)
+})
+
+test('a sidecar whose --version fails is reported with its output', () => {
+  const { root, bin } = sandbox()
+  exe(join(root, 'broken'), 'echo "dyld: Library not loaded"; exit 6')
+  const r = run('check-sidecar-version.sh', [join(root, 'broken'), '1.2.3', 'app X'], { bin })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /broken --version exited with status 6/)
   assert.match(r.out, /Library not loaded/)
 })

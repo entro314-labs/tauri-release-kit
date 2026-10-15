@@ -317,6 +317,34 @@ on:
         required: false
         type: boolean
         default: true
+      macos_linkage_scan_resources:
+        description: >-
+          With macos_linkage_check, also check .dylib/.so files elsewhere in
+          the .app (e.g. Contents/Resources), not just Contents/MacOS and
+          Contents/Frameworks. Off by default, so turning it on is a
+          deliberate choice for apps that ship libraries as resources.
+          macos_arch_check always includes those files.
+        required: false
+        type: boolean
+        default: false
+      macos_arch_check:
+        description: >-
+          With macos_linkage_check, also fail a darwin leg when a Mach-O file
+          in the .app lacks the leg's architecture (`lipo -archs`) - e.g. a
+          thin arm64 dylib or sidecar inside the x86_64 bundle, which the
+          cross-built Intel leg and a Rosetta smoke launch never notice.
+          Universal files pass. Off by default.
+        required: false
+        type: boolean
+        default: false
+      macos_arch_allowlist:
+        description: >-
+          Comma- or newline-separated paths relative to the .app (e.g.
+          'Contents/Resources/libfoo.dylib') that macos_arch_check skips -
+          files that are never loaded on the other architecture.
+        required: false
+        type: string
+        default: ''
       smoke_test:
         description: >-
           Install and launch the built packages on every leg whose runner can
@@ -327,6 +355,36 @@ on:
         required: false
         type: boolean
         default: false
+      sidecar_binaries:
+        description: >-
+          Comma-separated file names of extra binaries the bundles ship beside
+          the app (e.g. 'my-mcp'), checked by smoke_test on the Linux (deb,
+          AppImage) and macOS (.app) legs: each must be present and its
+          `--version` must print the release version (the last output line
+          equal to it, or ending in ' <version>'). Empty (the default) skips
+          it.
+        required: false
+        type: string
+        default: ''
+      rpm_requires:
+        description: >-
+          Comma-separated capabilities every .rpm must declare as Requires
+          (`rpm -qp --requires`), checked by smoke_test on the Linux legs,
+          e.g. 'libwebkit2gtk-4.1.so.0()(64bit),libgtk-3.so.0()(64bit)'.
+          Empty (the default) skips the check.
+        required: false
+        type: string
+        default: ''
+      rpm_install_image:
+        description: >-
+          Container image (e.g. 'fedora:43') in which smoke_test installs
+          each .rpm with dnf on a clean system and fails when an installed
+          executable or library has an unresolved dependency (`ldd -r`).
+          Native-arch Linux legs only; needs docker on the runner. Empty
+          (the default) skips it.
+        required: false
+        type: string
+        default: ''
       webdriver_smoke:
         description: >-
           A command that checks the built app's UI through WebDriver on the
@@ -1644,6 +1702,10 @@ jobs:
         if: matrix.os_name == 'darwin' && inputs.macos_linkage_check
         env:
           BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+          # lipo names Apple Silicon `arm64`; empty leaves the architecture unchecked.
+          EXPECTED_ARCH: ${{ inputs.macos_arch_check && (matrix.arch == 'aarch64' && 'arm64' || matrix.arch) || '' }}
+          ARCH_ALLOWLIST: ${{ inputs.macos_arch_allowlist }}
+          SCAN_RESOURCES: ${{ inputs.macos_linkage_scan_resources }}
         run: |
           set -euo pipefail
           # `app` is mandatory on darwin legs (the plan job enforces it).
@@ -1666,6 +1728,9 @@ jobs:
           BUNDLES: ${{ matrix.bundles }}
           VERSION: ${{ needs.check-changelog.outputs.version }}
           BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+          RPM_REQUIRES: ${{ inputs.rpm_requires }}
+          RPM_INSTALL_IMAGE: ${{ inputs.rpm_install_image }}
+          SIDECARS: ${{ inputs.sidecar_binaries }}
         run: |
           set -euo pipefail
           case "${RUNNER_ARCH}/${ARCH}" in
@@ -1679,10 +1744,12 @@ jobs:
           case "$OS_NAME" in
             linux)
               sudo apt-get install -y xvfb xauth
+              # `rpm -qp` for rpm_requires (the image's own rpm does the install check).
+              if [ -n "$RPM_REQUIRES" ]; then sudo apt-get install -y rpm; fi
               bash .release-kit/scripts/smoke-linux.sh "$BUNDLE_DIR" "$BARE" "$BUNDLES"
               ;;
             darwin)
-              bash .release-kit/scripts/smoke-macos.sh "$BUNDLE_DIR" "$BUNDLES"
+              bash .release-kit/scripts/smoke-macos.sh "$BUNDLE_DIR" "$BUNDLES" "$BARE"
               ;;
             windows)
               pwsh -NoProfile -File .release-kit/scripts/smoke-windows.ps1 -BundleDir "$BUNDLE_DIR" -Version "$BARE" -Bundles "$BUNDLES"

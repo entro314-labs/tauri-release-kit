@@ -422,7 +422,18 @@ dependency (e.g. the `vendored` feature of `openssl-sys`), or by bundling the
 dylib and linking it via `@rpath`. `macos_linkage_check: false` turns it off;
 the only legitimate reason is an app that is distributed exclusively in a way
 that guarantees the formula is installed (a Homebrew cask with
-`depends_on formula:`).
+`depends_on formula:`). Libraries shipped elsewhere in the bundle (e.g.
+`Contents/Resources`) are checked only with `macos_linkage_scan_resources: true`
+(or `macos_arch_check: true`).
+
+`macos_arch_check: true` additionally requires every one of those files to
+include the leg's architecture (`lipo -archs`; universal files pass). The
+Intel leg usually cross-builds on an Apple Silicon runner and its smoke
+launch, if any, runs under Rosetta, so a thin arm64 dylib or sidecar in the
+x86_64 bundle otherwise ships unnoticed and fails to load on Intel Macs.
+Files that are never loaded on the other architecture can be exempted with
+`macos_arch_allowlist` (paths relative to the `.app`, comma- or
+newline-separated).
 
 ## Package smoke tests (opt-in)
 
@@ -431,7 +442,7 @@ whose runner can execute it:
 
 | OS | Check |
 | --- | --- |
-| Linux | `dpkg-deb -f <deb> Version` equals the release version; the AppImage is extracted and started under Xvfb and must still be running after 15 s, with no panic or dynamic-linker error in its output |
+| Linux | `dpkg-deb -f <deb> Version` equals the release version; the AppImage is extracted and started under Xvfb and must still be running after 15 s, with no panic or dynamic-linker error in its output; opt-in rpm checks below |
 | Windows | each MSI's `ProductVersion` (read, not installed) equals the version; the NSIS installer runs silently into a scratch directory and the installed app must still be running after 10 s (install dir, app output and Application event-log errors are printed on failure) |
 | macOS | `hdiutil verify` on the dmg; the `.app`'s main executable must still be running after 10 s |
 
@@ -441,6 +452,34 @@ skipped with a notice. It is off by default because an app that exits
 without a display, needs first-run setup, or single-instances itself fails
 it for reasons that are not bugs; turn it on once your app starts cleanly on
 a bare runner. The logic lives in [`scripts/smoke-*`](scripts/).
+
+### Sidecar version check (opt-in)
+
+Binaries other programs are pointed at - an MCP server, a CLI - can go
+missing from a bundle or ship stale, and the app's own launch never notices.
+With `smoke_test` on, `sidecar_binaries` runs each listed file with
+`--version` in the extracted deb and AppImage (`usr/bin/`) and in the `.app`
+(`Contents/MacOS/`); the last output line must equal the release version or
+end in ` <version>`. Windows legs are not covered yet.
+
+```yaml
+      sidecar_binaries: 'my-mcp'
+```
+
+### rpm checks (opt-in)
+
+An rpm that declares no `Requires` for the libraries it links installs on
+a machine that cannot run it. Two inputs check the `.rpm` on the Linux legs
+when `smoke_test` is on (each skips when empty):
+
+```yaml
+      # Every capability must appear in `rpm -qp --requires`. tauri-bundler
+      # derives soname Requires from the binary; list the ones you rely on.
+      rpm_requires: 'libwebkit2gtk-4.1.so.0()(64bit),libgtk-3.so.0()(64bit)'
+      # dnf-installs each rpm in a fresh container of this image (no dev
+      # packages) and fails on any `ldd -r` "not found" among its files.
+      rpm_install_image: 'fedora:43'
+```
 
 ### WebDriver boot gate (opt-in)
 
