@@ -317,6 +317,16 @@ on:
         required: false
         type: boolean
         default: true
+      macos_linkage_scan_resources:
+        description: >-
+          With macos_linkage_check, also check .dylib/.so files elsewhere in
+          the .app (e.g. Contents/Resources), not just Contents/MacOS and
+          Contents/Frameworks. Off by default, so turning it on is a
+          deliberate choice for apps that ship libraries as resources.
+          macos_arch_check always includes those files.
+        required: false
+        type: boolean
+        default: false
       macos_arch_check:
         description: >-
           With macos_linkage_check, also fail a darwin leg when a Mach-O file
@@ -1614,6 +1624,7 @@ jobs:
           # lipo names Apple Silicon `arm64`; empty leaves the architecture unchecked.
           EXPECTED_ARCH: ${{ inputs.macos_arch_check && (matrix.arch == 'aarch64' && 'arm64' || matrix.arch) || '' }}
           ARCH_ALLOWLIST: ${{ inputs.macos_arch_allowlist }}
+          SCAN_RESOURCES: ${{ inputs.macos_linkage_scan_resources }}
         run: |
           set -euo pipefail
           # `app` is mandatory on darwin legs (the plan job enforces it).

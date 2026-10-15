@@ -12,9 +12,11 @@
 # every user machine without the same Homebrew formula crashes at launch with
 # "dyld: Library not loaded". Notarization does not look at load paths.
 #
-# Checked: every file in Contents/MacOS (the app and its sidecars), everything
-# under Contents/Frameworks, and any .dylib/.so elsewhere in the bundle — the
-# non-Mach-O ones are skipped. Flagged: load paths under /opt/homebrew/ (Apple
+# Checked: every file in Contents/MacOS (the app and its sidecars) and
+# everything under Contents/Frameworks; with SCAN_RESOURCES=true
+# (`macos_linkage_scan_resources`) or EXPECTED_ARCH set also any .dylib/.so
+# elsewhere in the bundle, e.g. Contents/Resources. The non-Mach-O ones are
+# skipped. Flagged: load paths under /opt/homebrew/ (Apple
 # Silicon Homebrew) and /usr/local/{opt,Cellar,lib}/ (Intel Homebrew — its
 # /usr/local/lib entries are symlinks into the Cellar, so the same bug).
 # @rpath/@executable_path/@loader_path and /usr/lib, /System are legitimate.
@@ -37,6 +39,7 @@ fi
 APP="$1"
 BAD_PATHS='^(/opt/homebrew/|/usr/local/(opt|Cellar|lib)/)'
 EXPECTED_ARCH="${EXPECTED_ARCH:-}"
+SCAN_RESOURCES="${SCAN_RESOURCES:-false}"
 # Entries trimmed of surrounding whitespace; spaces inside a path are kept.
 ALLOWED=",$(printf '%s' "${ARCH_ALLOWLIST:-}" | tr '\n' ',' | sed -E 's/[[:space:]]*,[[:space:]]*/,/g; s/^[[:space:]]+//; s/[[:space:]]+$//'),"
 FAIL=0
@@ -77,7 +80,11 @@ done < <(
     # no Contents/Frameworks) would otherwise end the list before the next find.
     find "$APP/Contents/MacOS" -type f -print0 2>/dev/null || true
     find "$APP/Contents/Frameworks" -type f -print0 2>/dev/null || true
-    find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -not -path "$APP/Contents/MacOS/*" -not -path "$APP/Contents/Frameworks/*" -print0 2>/dev/null || true
+    # Resources are also needed when the architecture check is on: a thin dylib
+    # shipped as a resource is exactly what it exists to catch.
+    if [ "$SCAN_RESOURCES" = "true" ] || [ -n "$EXPECTED_ARCH" ]; then
+      find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -not -path "$APP/Contents/MacOS/*" -not -path "$APP/Contents/Frameworks/*" -print0 2>/dev/null || true
+    fi
   }
 )
 

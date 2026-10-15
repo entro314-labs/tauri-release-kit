@@ -422,7 +422,9 @@ dependency (e.g. the `vendored` feature of `openssl-sys`), or by bundling the
 dylib and linking it via `@rpath`. `macos_linkage_check: false` turns it off;
 the only legitimate reason is an app that is distributed exclusively in a way
 that guarantees the formula is installed (a Homebrew cask with
-`depends_on formula:`).
+`depends_on formula:`). Libraries shipped elsewhere in the bundle (e.g.
+`Contents/Resources`) are checked only with `macos_linkage_scan_resources: true`
+(or `macos_arch_check: true`).
 
 `macos_arch_check: true` additionally requires every one of those files to
 include the leg's architecture (`lipo -archs`; universal files pass). The

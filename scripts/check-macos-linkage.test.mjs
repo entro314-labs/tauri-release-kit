@@ -62,7 +62,7 @@ test('Homebrew paths in a sidecar, a framework and a resource dylib are all repo
     'Contents/MacOS/sidecar': '/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib\n',
     'Contents/Frameworks/libx.dylib': '/usr/local/opt/libx/lib/libx.dylib\n',
     'Contents/Resources/plugins/liby.dylib': '/usr/local/Cellar/y/1.0/lib/liby.dylib\n/usr/local/lib/libz.1.dylib\n',
-  }))
+  }), { SCAN_RESOURCES: 'true' })
   assert.equal(r.code, 1)
   assert.match(r.out, /Contents\/MacOS\/sidecar links \/opt\/homebrew\/opt\/openssl@3\/lib\/libssl\.3\.dylib/)
   assert.match(r.out, /Contents\/Frameworks\/libx\.dylib links \/usr\/local\/opt\//)
@@ -74,9 +74,17 @@ test('resource dylibs are scanned even when the bundle has no Frameworks directo
   const r = check(bundle({
     'Contents/MacOS/my-app': SYSTEM,
     'Contents/Resources/resources/libfoo.dylib': '/opt/homebrew/lib/libbar.dylib\n',
-  }))
+  }), { SCAN_RESOURCES: 'true' })
   assert.equal(r.code, 1, r.out)
   assert.match(r.out, /Contents\/Resources\/resources\/libfoo\.dylib links \/opt\/homebrew\/lib\/libbar\.dylib/)
+})
+
+test('resource dylibs are left alone unless SCAN_RESOURCES is on', () => {
+  const r = check(bundle({
+    'Contents/MacOS/my-app': SYSTEM,
+    'Contents/Resources/resources/libfoo.dylib': '/opt/homebrew/lib/libbar.dylib\n',
+  }))
+  assert.equal(r.code, 0, r.out)
 })
 
 test('a bundle with no Mach-O files, or no bundle, is an error', () => {
