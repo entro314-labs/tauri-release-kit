@@ -72,6 +72,10 @@ jobs:
       #     Linux legs through tauri-driver under Xvfb with a fresh profile.
       # webdriver_smoke: node tooling/scripts/boot-smoke.ts
       # webdriver_binary: my-app
+      # --- AppImage repack (optional): your command rewrites each Linux leg's
+      #     AppImage in place (e.g. onto the host's WebKitGTK); the kit then
+      #     re-signs it for the updater and replaces it on the draft.
+      # appimage_repack: node tooling/scripts/appimage-repack.ts
       # --- Post-release patch-bump PR (default false). Leave it off with
       #     release-kit, which writes the version BEFORE the tag; turn it on
       #     only when versions are set by hand with version-manager.ts.
