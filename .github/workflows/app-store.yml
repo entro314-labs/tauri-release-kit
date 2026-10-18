@@ -234,8 +234,9 @@ jobs:
       # architecture the runner happens to be.
       - name: Setup Rust
         if: steps.prereq.outputs.ready == 'true'
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       # No Rust cache: this builds the signed binary Apple receives, from a
@@ -535,8 +536,9 @@ jobs:
 
       - name: Setup Rust
         if: steps.prereq.outputs.ready == 'true'
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
       # No Rust cache: this builds the signed binary Apple receives, from a

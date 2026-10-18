@@ -727,8 +727,9 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           components: rustfmt
 
       - name: Rust format check
@@ -1061,8 +1062,9 @@ jobs:
       # uses; the toml MUST declare components = ["rustfmt", "clippy"], because
       # rustup auto-installs it with this action's minimal profile.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
@@ -3045,7 +3047,7 @@ jobs:
 
       - name: Submit to winget
         if: steps.prereq.outputs.ready == 'true'
-        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        uses: vedantmgoyal9/winget-releaser@b7370d4d152efdce803a26cc6ca9eee58cb2ad54 # v2
         with:
           # No `version`: the action takes it from the tag, minus the leading v.
           identifier: ${{ inputs.winget_identifier }}
