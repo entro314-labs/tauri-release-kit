@@ -502,6 +502,31 @@ for `tauri-driver`, and Windows would need an `msedgedriver` matching the
 runner's WebView2, so only Linux legs run it. Details in
 [`scripts/webdriver-smoke.sh`](scripts/webdriver-smoke.sh).
 
+### AppImage repack (opt-in)
+
+Tauri's AppImage bundles the build image's WebKitGTK, GTK, GLib and
+GStreamer, which fail on hosts with newer Mesa / NVIDIA drivers or Wayland
+compositors. `appimage_repack` runs your command on each Linux leg's AppImage
+after the build, e.g. one that strips that stack so the image uses the host's
+WebKitGTK:
+
+```yaml
+      appimage_repack: node tooling/scripts/appimage-repack.ts
+```
+
+The command runs from the repository root with the AppImage's path as its
+last argument and rewrites the file in place; it must re-embed the GPG
+signature itself (`SIGN`, `SIGN_KEY` and `APPIMAGETOOL_SIGN_PASSPHRASE` are in
+its environment when `LINUX_GPG_PRIVATE_KEY` is set, the same contract
+linuxdeploy's appimagetool step uses). The kit then signs the rewritten file
+for the updater (`tauri signer sign --app-version <version>`), checks that
+signature against the app's `plugins.updater.pubkey` over the file's actual
+bytes ([`scripts/updater-signature.mjs`](scripts/updater-signature.mjs)), and
+replaces the AppImage and its `.sig` that tauri-action uploaded to the draft.
+The smoke test and the signature checks run on the rewritten file. Needs
+`TAURI_SIGNING_PRIVATE_KEY`; the leg runs the AppImage to extract it, so the
+command runs on native legs only (the kit's Linux legs all are).
+
 ## Checksums, SBOM and build provenance
 
 > **Existing callers must add two permissions.** The `attest` job needs

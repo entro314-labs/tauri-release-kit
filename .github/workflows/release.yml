@@ -404,6 +404,23 @@ on:
         required: false
         type: string
         default: ''
+      appimage_repack:
+        description: >-
+          A command that rewrites the built AppImage in place on the Linux legs
+          (e.g. 'node tooling/scripts/appimage-repack.ts', which drops the
+          bundled WebKitGTK stack so the image runs on the host's). It runs
+          from the repository root with the AppImage's path as its last
+          argument, after tauri-action uploaded the bundles to the draft and
+          before the smoke tests. The kit then re-signs the rewritten file for
+          the updater (tauri signer sign --app-version), verifies that
+          signature against the app's pubkey, and replaces the AppImage and its
+          .sig on the draft. The command must re-embed a GPG signature itself
+          (SIGN / SIGN_KEY / APPIMAGETOOL_SIGN_PASSPHRASE are in its env when
+          LINUX_GPG_PRIVATE_KEY is set). Needs TAURI_SIGNING_PRIVATE_KEY. Empty
+          (the default) skips it.
+        required: false
+        type: string
+        default: ''
       winget_identifier:
         description: >-
           winget PackageIdentifier (e.g. 'MyOrg.MyApp') to submit each STABLE
@@ -1678,7 +1695,7 @@ jobs:
       # The kit's own scripts, at the commit the caller pinned. Checked out
       # AFTER tauri-action so its config/workspace discovery never sees them.
       - name: Check out the kit's scripts
-        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check)
+        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check) || (matrix.os_name == 'linux' && inputs.appimage_repack != '')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -1687,11 +1704,83 @@ jobs:
           persist-credentials: false
 
       - name: Confirm the kit checkout
-        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check)
+        if: inputs.smoke_test || (matrix.os_name == 'darwin' && inputs.macos_linkage_check) || (matrix.os_name == 'linux' && inputs.appimage_repack != '')
         shell: bash
         run: |
           test -f .release-kit/scripts/verify-release.mjs \
             || { echo "::error::The kit checkout did not resolve (job.workflow_repository/job.workflow_sha) — no scripts/verify-release.mjs"; exit 1; }
+
+      # Post-build AppImage rewrite (appimage_repack). tauri-action has already
+      # uploaded the AppImage and an updater .sig of the PRE-rewrite bytes to the
+      # draft; both are replaced here, before anything is published. The .sig
+      # must be made AFTER the rewrite: a signature of the old bytes still
+      # carries the right key id, so verify-release would pass it, and every
+      # installed copy would then reject the update. Hence the full signature
+      # check (scripts/updater-signature.mjs) before the upload. Runs before
+      # the smoke tests and the signature verification below, so those check
+      # the rewritten file.
+      - name: Repack the AppImage and re-sign it
+        if: matrix.os_name == 'linux' && inputs.appimage_repack != '' && contains(format(',{0},', matrix.bundles), ',appimage,')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ needs.check-changelog.outputs.releases_owner }}/${{ needs.check-changelog.outputs.releases_name }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ needs.check-changelog.outputs.version }}
+          REPACK_COMMAND: ${{ inputs.appimage_repack }}
+          PROJECT_PATH: ${{ inputs.project_path }}
+          SRC_TAURI: ${{ format('{0}/src-tauri', inputs.project_path) }}
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # GitHub's asset API fails transiently now and then; retry a call before failing the job.
+          retry() { local n=1; until "$@"; do [ "$n" -ge 3 ] && return 1; sleep $((n * 15)); n=$((n + 1)); done; }
+          mapfile -t IMAGES < <(find "$BUNDLE_DIR/appimage" -maxdepth 1 -name '*.AppImage')
+          if [ "${#IMAGES[@]}" -ne 1 ]; then
+            echo "::error::Expected one .AppImage under ${BUNDLE_DIR}/appimage, found ${#IMAGES[@]}"
+            exit 1
+          fi
+          APPIMAGE="$(cd "$(dirname "${IMAGES[0]}")" && pwd)/$(basename "${IMAGES[0]}")"
+          NAME="$(basename "$APPIMAGE")"
+          VERSION="${TAG#v}"
+
+          # REPACK_COMMAND is a trusted workflow input (the caller's own release.yml), split into words.
+          read -r -a COMMAND <<< "$REPACK_COMMAND"
+          "${COMMAND[@]}" "$APPIMAGE"
+
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::appimage_repack is set but TAURI_SIGNING_PRIVATE_KEY is not: the rewritten AppImage cannot be signed for the updater"
+            exit 1
+          fi
+          rm -f "$APPIMAGE.sig"
+          # The key and password come from the env (the tauri CLI reads both; an empty password is
+          # valid for a passwordless key). --app-version binds the signature to this release the
+          # way `tauri build` does - an app with requireSignedVersion rejects an unbound one.
+          (cd "$PROJECT_PATH" && pnpm tauri signer sign --app-version "$VERSION" "$APPIMAGE")
+          test -s "$APPIMAGE.sig" || { echo "::error::tauri signer wrote no ${NAME}.sig"; exit 1; }
+          node .release-kit/scripts/updater-signature.mjs "$APPIMAGE" "$APPIMAGE.sig" "$SRC_TAURI" "$VERSION"
+
+          # Replace tauri-action's uploads. It labels each asset with the name it uploaded, and the
+          # checksums job relabels assets on a retry, so match the label or the stored name.
+          gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets?per_page=100" \
+            --jq '.[] | [.id, .name, (.label // "")] | @tsv' > "${RUNNER_TEMP}/appimage-assets.tsv"
+          for FILE in "$NAME" "$NAME.sig"; do
+            FOUND=0
+            while IFS=$'\t' read -r id name label; do
+              if [ "$name" = "$FILE" ] || [ "$label" = "$FILE" ]; then
+                retry gh api -X DELETE "repos/${REPO}/releases/assets/${id}"
+                FOUND=1
+              fi
+            done < "${RUNNER_TEMP}/appimage-assets.tsv"
+            if [ "$FOUND" = 0 ]; then
+              echo "::error::${FILE} is not on the draft under that name or label; replacing it would leave two copies"
+              exit 1
+            fi
+          done
+          retry gh release upload "$TAG" "${APPIMAGE}#${NAME}" "${APPIMAGE}.sig#${NAME}.sig" --repo "$REPO" --clobber
+          echo "Replaced ${NAME} and ${NAME}.sig on the draft with the repacked, re-signed AppImage."
 
       # A binary or sidecar linked against a Homebrew library records that
       # absolute path; the runner has the file, so the leg builds, notarizes
