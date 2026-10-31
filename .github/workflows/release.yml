@@ -654,7 +654,7 @@ jobs:
       # repo with Contents: write — before any leg runs.
       - name: Preflight - GitHub App can write the releases repo
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -947,7 +947,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -1053,7 +1053,7 @@ jobs:
       # `package-manager-cache: false` also stops setup-node's automatic
       # caching when package.json's packageManager names npm.
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node_version }}
           package-manager-cache: false
@@ -1475,7 +1475,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -1944,7 +1944,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2117,7 +2117,7 @@ jobs:
 
       - name: Install Syft
         id: syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           # The action's default (1.51.1) predates the fix for GHSA-mw2c-m758-9v5q.
           syft-version: v1.52.0
@@ -2183,7 +2183,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2280,7 +2280,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2339,7 +2339,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2447,7 +2447,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2510,7 +2510,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2757,7 +2757,7 @@ jobs:
       - name: Mint tap token (GitHub App)
         id: app_token
         if: inputs.app_client_id != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -3084,7 +3084,7 @@ jobs:
       - name: Mint bucket token (GitHub App)
         id: app_token
         if: inputs.app_client_id != ''
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
