@@ -720,6 +720,24 @@ Rules learned running the kit's consumers this way:
 - [templates/flatpak/](templates/flatpak/) — AppStream MetaInfo and an
   escape-hatch flatpak manifest
 
+## Shared with linux-release-kit
+
+The two kits carry the same logic in parallel, and a fix landing in one is
+ported to the other in the same change — in both directions. The 2026-09-27
+audit found F-04, F-15, F-18 and F-24 were all porting gaps: a fix one kit
+had that the other did not. What is shared:
+
+- `aur.yml` — prerelease pkgver with the hyphen deleted, so `vercmp` sorts it
+  below the stable release
+- `flatpak.yml` — manifest generation, the binary lookup in the .deb, the
+  `|| true` pipefail guard around it
+- the semver `make_latest` guard in publish-release
+- `RELEASES_TOKEN` read only when `releases_repo` is set
+- the rpm signature check (`rpmkeys --dbpath` on a scratch database)
+- the concurrency key on `inputs.tag || github.ref_name` in `templates/release.yml`
+- the verify-release asset contract and its summary table
+- the attestation, SBOM and `SHA256SUMS` jobs (same names and format)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) — in short: read GOTCHAS.md before
