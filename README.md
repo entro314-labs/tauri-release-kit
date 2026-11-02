@@ -297,6 +297,7 @@ not the code, in a few minutes:
 | GitHub App (`app_client_id` + `APP_PRIVATE_KEY`) | a token is minted for the releases repo and the tap, as release.yml does — that fails unless the App is installed there with Contents: write |
 | `RELEASES_TOKEN`, `HOMEBREW_TAP_TOKEN`, `SCOOP_TAP_TOKEN` (when no App) | `gh api repos/<repo> --jq .permissions.push` must be `true` |
 | `WINGET_TOKEN` | can push to `<winget_fork_user>/winget-pkgs`; warns while the package is not in winget-pkgs yet |
+| `AUR_SSH_PRIVATE_KEY` | one SSH session to `aur@aur.archlinux.org` as `aur.yml` opens it; the AUR's "Welcome to AUR, <user>!" greeting is the proof (it has no shell, so the exit code is not) |
 
 An optional credential that is not configured is a notice; one that is set but
 broken, or half-configured, fails — every check runs, so one run lists all
