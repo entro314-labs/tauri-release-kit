@@ -23,7 +23,7 @@ on:
           linter that changes under you turns an unrelated pull request red.
         required: false
         type: string
-        default: '2.9.4'
+        default: '2.11.0'
       lint_branch_commits:
         description: >-
           Also check every commit on the branch, not just the title. Leave off for a
