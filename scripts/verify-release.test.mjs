@@ -204,11 +204,12 @@ test('minisign key ids from real tauri output', () => {
   assert.equal(pubkeyKeyId('/path/to/key.pub'), null)
 })
 
+// The base entry per target, plus the `-nsis` entry a Windows target always has (its
+// signature, the -setup.exe.sig, is required on every release).
 function goodManifest(targets = ALL) {
-  return {
-    version: '1.2.3',
-    platforms: Object.fromEntries(targets.map((t) => [t, { url: BASE + updaterAsset(t, naming, '1.2.3'), signature: SIG }])),
-  }
+  const entries = targets.map((t) => [t, { url: BASE + updaterAsset(t, naming, '1.2.3'), signature: SIG }])
+  for (const t of targets.filter((t) => t.startsWith('windows-'))) entries.push([`${t}-nsis`, { url: BASE + updaterAsset(t, naming, '1.2.3'), signature: SIG }])
+  return { version: '1.2.3', platforms: Object.fromEntries(entries) }
 }
 function goodSigs(targets = ALL) {
   return new Map(targets.map((t) => [`${updaterAsset(t, naming, '1.2.3')}.sig`, SIG]))
@@ -234,7 +235,7 @@ test('checkManifest catches wrong repo, wrong asset, stale sig, foreign key, pla
   assert.match(r.urls[0], /private-app/)
   assert.match(r.urls[1], /expected MyApp_1.2.3_x64-setup.exe/)
   assert.deepEqual(r.signatures, ['linux-x86_64: signature differs from MyApp_1.2.3_amd64.AppImage.sig'])
-  assert.equal(r.envelopes.length, 3)
+  assert.equal(r.envelopes.length, 4) // darwin, windows, windows-nsis, linux-x86_64; linux-aarch64 is missing
   assert.match(r.envelopes[0], /signed by key 1F96F7D3AB3DD801, but plugins.updater.pubkey is B7C118571ACF640A/)
 })
 
@@ -254,6 +255,46 @@ test('installerEntries names the .deb and .rpm a Linux target updates from', () 
   ])
   assert.deepEqual(installerEntries('linux-aarch64', naming, '1.2.3').map((e) => e.asset), ['MyApp_1.2.3_arm64.deb', 'MyApp-1.2.3-1.aarch64.rpm'])
   assert.deepEqual(installerEntries('darwin-aarch64', naming, '1.2.3'), [])
+})
+
+test('installerEntries names the NSIS and MSI installers a Windows target updates from', () => {
+  assert.deepEqual(installerEntries('windows-x86_64', naming, '1.2.3'), [
+    { key: 'windows-x86_64-nsis', asset: 'MyApp_1.2.3_x64-setup.exe' },
+    { key: 'windows-x86_64-msi', asset: 'MyApp_1.2.3_x64_en-US.msi' },
+  ])
+  // WiX has no ARM64 target, so no MSI entry there.
+  assert.deepEqual(installerEntries('windows-aarch64', naming, '1.2.3'), [{ key: 'windows-aarch64-nsis', asset: 'MyApp_1.2.3_arm64-setup.exe' }])
+  // Several WiX languages: the first MSI by name, the one create-updater-json picks.
+  const n = { ...naming, windows: { product: 'MyApp', wixLanguages: ['en-US', 'de-DE'] } }
+  assert.equal(installerEntries('windows-x86_64', n, '1.2.3')[1].asset, 'MyApp_1.2.3_x64_de-DE.msi')
+})
+
+test('checkManifest requires the -nsis entry and, for a signed MSI, the -msi entry', () => {
+  const targets = ['windows-x86_64']
+  const manifest = goodManifest(targets)
+  const sigs = goodSigs(targets)
+  const ok = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(ok, { version: [], platforms: [], urls: [], signatures: [], envelopes: [] })
+
+  // The .msi.sig is on the release: the -msi entry is required, and must point at the MSI.
+  sigs.set('MyApp_1.2.3_x64_en-US.msi.sig', SIG)
+  const missing = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(missing.platforms, ['windows-x86_64-msi missing'])
+  manifest.platforms['windows-x86_64-msi'] = { url: `${BASE}MyApp_1.2.3_x64-setup.exe`, signature: SIG }
+  const wrong = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(wrong.platforms, [])
+  assert.deepEqual(wrong.urls, ['windows-x86_64-msi: points at MyApp_1.2.3_x64-setup.exe, expected MyApp_1.2.3_x64_en-US.msi'])
+  manifest.platforms['windows-x86_64-msi'].url = `${BASE}MyApp_1.2.3_x64_en-US.msi`
+  const good = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: sigs, stored: new Map() })
+  assert.deepEqual(good, { version: [], platforms: [], urls: [], signatures: [], envelopes: [] })
+
+  // An -msi entry without the .msi.sig on the release, and a manifest that forgot -nsis.
+  const unsigned = checkManifest({ manifest, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: goodSigs(targets), stored: new Map() })
+  assert.deepEqual(unsigned.platforms, ['windows-x86_64-msi not shipped'])
+  const noNsis = goodManifest(targets)
+  delete noNsis.platforms['windows-x86_64-nsis']
+  const r = checkManifest({ manifest: noNsis, version: '1.2.3', targets, downloadBase: BASE, naming, sigFiles: goodSigs(targets), stored: new Map() })
+  assert.deepEqual(r.platforms, ['windows-x86_64-nsis missing'])
 })
 
 test('checkManifest requires an installer entry for every signed package, and only those', () => {

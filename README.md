@@ -578,7 +578,9 @@ every problem at once, unless:
 - the update manifest has the tag's version, exactly the shipped platforms
   (plus `linux-<arch>-deb` / `linux-<arch>-rpm` for every package whose
   `.deb.sig`/`.rpm.sig` is on the release, so .deb and .rpm installs can
-  self-update), URLs under `https://github.com/<releases repo>/releases/download/<tag>/`
+  self-update, and `windows-<arch>-nsis` / `windows-x86_64-msi` for the
+  Windows installers, so an MSI install is not updated with the NSIS
+  installer), URLs under `https://github.com/<releases repo>/releases/download/<tag>/`
   pointing at each platform's updater artifact, and signatures byte-identical
   to the uploaded `.sig` files, made by the key in `plugins.updater.pubkey`
   (the tauri CLI only warns when the signing key does not match it).

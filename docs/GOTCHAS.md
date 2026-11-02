@@ -64,9 +64,11 @@ re-read this first.
   at all. `windows_bundles: 'nsis,msi'` opts into MSI and the `plan` job drops
   it — with a warning, not an error — on prerelease versions and on the
   aarch64 leg, so one impossible combination never costs a shippable release.
-  The updater manifest matchers consume `*_x64-setup.exe` /
-  `*_arm64-setup.exe` (+ `.sig`) and deliberately ignore `.msi`; a manifest
-  with a null platform fails verify-release on purpose.
+  The updater manifest's `windows-<arch>` entry is `*_x64-setup.exe` /
+  `*_arm64-setup.exe` (+ `.sig`), carried under `windows-<arch>-nsis` too;
+  an `.msi` (+ `.msi.sig`) on the release adds `windows-x86_64-msi`, so an
+  MSI install updates through msiexec instead of the NSIS installer. A
+  manifest with a null platform fails verify-release on purpose.
 
 - **`--config` is a list, `--bundles` is comma-separated.** Tauri's CLI takes
   `--config` repeatedly and merges the files in order (later wins), which is

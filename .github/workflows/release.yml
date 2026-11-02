@@ -1985,8 +1985,10 @@ jobs:
               process.env.TARGETS.split(',').map((t) => [t, { signature: null, url: null, size: null }]),
             );
 
-            // First-match-wins predicates over asset filenames. Windows uses
-            // the NSIS *-setup.exe on both arches (no MSI in CI — see matrix).
+            // First-match-wins predicates over asset filenames. The base
+            // Windows entry is the NSIS *-setup.exe on both arches; the MSI,
+            // when windows_bundles has it (x64 only — see the plan job), gets
+            // its own installer entry below.
             const matchers = [
               { key: 'darwin-aarch64', kind: 'url', test: (n) => n.endsWith('.app.tar.gz') && n.includes('aarch64') },
               { key: 'darwin-aarch64', kind: 'sig', test: (n) => n.endsWith('.app.tar.gz.sig') && n.includes('aarch64') },
@@ -2011,7 +2013,13 @@ jobs:
               { key: 'linux-aarch64-deb', base: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('_arm64.deb.sig') },
               { key: 'linux-aarch64-rpm', base: 'linux-aarch64', kind: 'url', test: (n) => n.endsWith('.aarch64.rpm') },
               { key: 'linux-aarch64-rpm', base: 'linux-aarch64', kind: 'sig', test: (n) => n.endsWith('.aarch64.rpm.sig') },
+              // Likewise an .msi install updates from the .msi (msiexec) instead of
+              // being handed the NSIS installer. One MSI per WiX language: the first
+              // by name is the entry (verify-release expects the same one).
+              { key: 'windows-x86_64-msi', base: 'windows-x86_64', kind: 'url', test: (n) => n.endsWith('.msi') && /_x64_/.test(n) },
+              { key: 'windows-x86_64-msi', base: 'windows-x86_64', kind: 'sig', test: (n) => n.endsWith('.msi.sig') && /_x64_/.test(n) },
             ];
+            assets.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
             const fetchSignatureBody = async (assetId) => {
               const sig = await github.rest.repos.getReleaseAsset({
@@ -2035,10 +2043,14 @@ jobs:
                   platforms[matcher.key] = { signature: null, url: null, size: null };
                   installerKeys.add(matcher.key);
                 }
+                // Assets are sorted by name above, so the first of several matches
+                // (the MSI languages) is the entry; every other key has one match.
                 if (matcher.kind === 'url') {
+                  if (platforms[matcher.key].url) break;
                   platforms[matcher.key].url = tagBase + encodeURIComponent(asset.name);
                   platforms[matcher.key].size = asset.size;
                 } else {
+                  if (platforms[matcher.key].signature) break;
                   platforms[matcher.key].signature = await fetchSignatureBody(asset.id);
                 }
                 break;
@@ -2050,6 +2062,14 @@ jobs:
             // those installs keep updating through their package manager.
             for (const key of installerKeys) {
               if (!platforms[key].url || !platforms[key].signature) delete platforms[key];
+            }
+
+            // The NSIS installer is the base `windows-<arch>` entry itself; carried
+            // under `windows-<arch>-nsis` too, the installer-specific key the updater
+            // looks up first, so an NSIS install is never handed the MSI.
+            for (const target of Object.keys(platforms)) {
+              if (!/^windows-[^-]+$/.test(target)) continue;
+              if (platforms[target].url && platforms[target].signature) platforms[`${target}-nsis`] = { ...platforms[target] };
             }
 
             // Incomplete entries stay: verify-release fails loudly rather than

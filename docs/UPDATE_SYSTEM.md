@@ -68,6 +68,16 @@ the update card states below.
   `createUpdaterArtifacts`) is on the release. The updater installs them with
   `dpkg -i` / `rpm -U` through pkexec. `verify-release` requires the entry for
   every signed package and rejects one for an unsigned package.
+- **Installer entries for Windows**: the same lookup order applies on
+  Windows, where an app installed from the `.msi` must not be updated with
+  the NSIS installer (two install records, two uninstallers). Next to
+  `windows-<arch>` (the NSIS `*-setup.exe`, kept as is) the manifest carries
+  `windows-<arch>-nsis` — the same installer under its own key — and, when
+  `windows_bundles` includes `msi` and the `.msi.sig` is on the release,
+  `windows-x86_64-msi` pointing at the MSI (WiX has no ARM64 target). The
+  updater runs the MSI through msiexec. With several WiX languages the entry
+  is the first MSI by name. `verify-release` requires both entries exactly as
+  it does the Linux ones.
 - **Pre-commit size**: the kit manifest carries a per-platform `size`
   (bytes) extension; the check command reads it so the UI can say
   "Download Update (42.3 MB)" *before* the user commits.

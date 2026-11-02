@@ -15,9 +15,9 @@
  *     channel manifest — both missing and unexpected names are failures
  *   - every asset is non-empty and GitHub has computed its sha256 digest
  *   - the updater manifest has the right version, exactly the shipped platform set (plus a
- *     `<target>-deb` / `<target>-rpm` entry for every Linux package whose updater signature is
- *     on the release), and every URL points at the serving repo's download path for this tag
- *     and at that entry's updater artifact
+ *     `<target>-deb` / `-rpm` / `-nsis` / `-msi` entry for every Linux package and Windows
+ *     installer whose updater signature is on the release), and every URL points at the
+ *     serving repo's download path for this tag and at that entry's updater artifact
  *   - every manifest signature equals the uploaded .sig byte for byte, decodes to a minisign
  *     envelope, and was made by the key whose public half the app ships
  *     (plugins.updater.pubkey) — the tauri CLI only warns about a mismatched key, and a
@@ -202,12 +202,16 @@ export function updaterAsset(target, naming, version) {
 }
 
 /**
- * The installer-specific updater entries a Linux target gets next to its AppImage one:
- * `<target>-deb` and `<target>-rpm`. tauri-plugin-updater looks up `<os>-<arch>-<installer>`
- * before `<os>-<arch>`, so a copy installed from the .deb updates from the .deb (dpkg through
- * pkexec) instead of being handed the AppImage, which it can't install. An entry exists only
- * when the package's updater signature is on the release — a CLI too old to sign packages
- * leaves those installs on the package manager, exactly as before.
+ * The installer-specific updater entries a target gets next to its base one: `<target>-deb`
+ * and `<target>-rpm` on Linux, `<target>-nsis` and (x64 only — WiX has no ARM64 target)
+ * `<target>-msi` on Windows. tauri-plugin-updater looks up `<os>-<arch>-<installer>` before
+ * `<os>-<arch>`, so a copy installed from the .deb updates from the .deb (dpkg through
+ * pkexec) instead of being handed the AppImage, which it can't install, and an .msi install
+ * updates through msiexec instead of the NSIS installer. An entry exists only when the
+ * package's updater signature is on the release — a CLI too old to sign packages leaves
+ * those installs on the package manager, exactly as before. The NSIS entry is the base
+ * Windows entry under its installer key. Several WiX languages give several MSIs: the entry
+ * is the first by name, as create-updater-json picks it.
  * @param {string} target
  * @param {ReturnType<typeof appNaming>} naming
  * @param {string} version bare version (no leading v)
@@ -215,7 +219,14 @@ export function updaterAsset(target, naming, version) {
  */
 export function installerEntries(target, naming, version) {
   const t = TARGETS[target]
-  if (!t || t.os !== 'linux') return []
+  if (!t) return []
+  if (t.os === 'windows') {
+    const stem = `${naming.windows.product}_${version}_${t.win}`
+    const entries = [{ key: `${target}-nsis`, asset: `${stem}-setup.exe` }]
+    if (t.win !== 'arm64') entries.push({ key: `${target}-msi`, asset: naming.windows.wixLanguages.map((lang) => `${stem}_${lang}.msi`).sort()[0] })
+    return entries
+  }
+  if (t.os !== 'linux') return []
   const p = naming.linux.product
   return [
     { key: `${target}-deb`, asset: `${p}_${version}_${t.deb}.deb` },
@@ -375,7 +386,8 @@ export function checkManifest({ manifest, version, targets, downloadBase, naming
   const have = Object.keys(platforms)
 
   // Every entry the manifest must carry: one per shipped target, plus an installer entry for
-  // each Linux package whose updater signature is on the release (see installerEntries).
+  // each Linux package and Windows installer whose updater signature is on the release (see
+  // installerEntries).
   const wanted = targets.map((target) => ({ key: target, asset: updaterAsset(target, naming, version) }))
   for (const target of targets) {
     for (const entry of installerEntries(target, naming, version)) {
