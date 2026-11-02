@@ -486,10 +486,12 @@ jobs:
           REPO: ${{ steps.rel.outputs.repo }}
           TAG: ${{ steps.rel.outputs.tag }}
           BUNDLE: ${{ steps.build.outputs.bundle }}
+          BUNDLE_NAME: ${{ steps.build.outputs.name }}
         run: |
           set -euo pipefail
           # --clobber so a re-run replaces the asset instead of 422-ing.
           gh release upload "$TAG" "$BUNDLE" --repo "$REPO" --clobber
+          echo "::notice::Attached ${BUNDLE_NAME} to https://github.com/${REPO}/releases/tag/${TAG}"
 
       # The manifest is the thing you actually submit to Flathub, so keep it
       # even when nothing was attached to the release.
