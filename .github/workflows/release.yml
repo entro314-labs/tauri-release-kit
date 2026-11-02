@@ -2275,6 +2275,10 @@ jobs:
       contents: write        # SHA256SUMS is read from the still-draft release
       id-token: write        # Sigstore signing certificate
       attestations: write    # store the attestation on this repository
+    # The attest step's own outcome (continue-on-error keeps the job green):
+    # verify-release puts it in the verification summary.
+    outputs:
+      outcome: ${{ steps.attest.outcome }}
     steps:
       # releases_repo token via the GitHub App (see create-release).
       - name: Mint releases-repo token (GitHub App)
@@ -2403,7 +2407,10 @@ jobs:
     # GitHub sha256 digest, and the updater manifest must cover exactly the
     # shipped platforms with URLs on the serving repo's tag path and signatures
     # byte-identical to the uploaded .sig files, made by the app's own pubkey.
-    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json, checksums, cosign]
+    # attest is only here for its outcome in the summary: the `if` below does
+    # not look at its result, so a failed attestation still verifies (and
+    # publish-release decides, as before, whether the release goes out).
+    needs: [check-changelog, plan, create-release, build-and-release, create-updater-json, checksums, cosign, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: ${{ inputs.environment }}
@@ -2471,6 +2478,7 @@ jobs:
           SRC_TAURI: app/${{ inputs.project_path }}/src-tauri
           SUMS_SIGNED: ${{ needs.checksums.outputs.signed }}
           COSIGN_SIGNED: ${{ needs.cosign.result == 'success' }}
+          ATTESTATION: ${{ needs.attest.outputs.outcome }}
         with:
           github-token: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |

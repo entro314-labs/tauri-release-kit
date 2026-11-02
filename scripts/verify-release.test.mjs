@@ -8,6 +8,7 @@ import test from 'node:test'
 import {
   appNaming,
   assetIntegrity,
+  attestationState,
   buildChecks,
   cargoPackageName,
   checkManifest,
@@ -332,11 +333,19 @@ test('buildChecks: published, wrong prerelease flag, unreadable manifest', () =>
 
 test('renderSummary escapes table cells and counts failures', () => {
   const md = renderSummary({
-    tag: 'v1.2.3', releaseUrl: 'https://x', assetCount: 3, platformCount: 1,
+    tag: 'v1.2.3', releaseUrl: 'https://x', assetCount: 3, platformCount: 1, attestation: 'attested',
     checks: [{ name: 'a', ok: true, detail: 'ok' }, { name: 'b', ok: false, detail: 'x | y\nz' }],
   })
   assert.match(md, /\*\*1 check\(s\) failed\*\*/)
   assert.match(md, /\| b \| \*\*FAIL\*\* \| x \\\| y z \|/)
+  assert.match(md, /\| Attestation \| attested \|/)
+})
+
+test('attestationState: the attest step\'s outcome becomes a summary row, never a failed check', () => {
+  assert.equal(attestationState('success'), 'attested')
+  assert.equal(attestationState('failure'), 'failed (release continues)')
+  assert.equal(attestationState(''), 'skipped')
+  assert.equal(attestationState(undefined), 'skipped')
 })
 
 function fakeCore() {
@@ -384,6 +393,16 @@ test('run: verifies through the Octokit client and writes the summary', async ()
   assert.equal(out.outputs.summary_written, 'true')
   assert.match(out.summary, /all checks passed/)
   assert.deepEqual(github.calls[0], ['getRelease', { owner: 'org', repo: 'myapp-releases', release_id: 7 }])
+})
+
+test('run: a failed attestation is reported in the summary and does not fail verification', async () => {
+  const { names, contents, env } = runFixture()
+  const github = fakeGithub(() => releaseFor(names), contents)
+  const { core, out } = fakeCore()
+  await run({ github, core, env: { ...env, ATTESTATION: 'failure' }, sleep: async () => {} })
+  assert.equal(out.failed, null, out.failed)
+  assert.match(out.summary, /\| Attestation \| failed \(release continues\) \|/)
+  assert.match(out.summary, /all checks passed/)
 })
 
 test('run: re-reads eight times, then fails with every broken check in the summary', async () => {

@@ -583,7 +583,9 @@ every problem at once, unless:
   to the uploaded `.sig` files, made by the key in `plugins.updater.pubkey`
   (the tauri CLI only warns when the signing key does not match it).
 
-The job's summary page shows a pass/fail table either way. `publish-release`
+The job's summary page shows a pass/fail table either way, with the `attest`
+job's outcome (attested / failed, release continues / skipped) above it.
+`publish-release`
 re-reads the release immediately before flipping it and refuses if it is no
 longer a draft, then summarises the publish and the anonymous URL checks.
 

@@ -503,11 +503,25 @@ function list(xs) {
 }
 
 /**
+ * What the summary says about build provenance, from the attest step's outcome. A failed
+ * attestation never fails the release (private repos off Enterprise Cloud cannot have one),
+ * so it is a row in the header, not a check; anything but the two outcomes (the CLI, an
+ * attest job that died before its attest step) reads as skipped.
+ * @param {string | undefined} outcome 'success' | 'failure' | ''
+ */
+export function attestationState(outcome) {
+  if (outcome === 'success') return 'attested'
+  if (outcome === 'failure') return 'failed (release continues)'
+  return 'skipped'
+}
+
+/**
  * The step summary: a failed run explains itself on its summary page.
  * @param {{ tag: string, releaseUrl: string, assetCount: number | string, platformCount: number | string,
- *   checks: { name: string, ok: boolean, detail: string }[] }} input
+ *   attestation: string, checks: { name: string, ok: boolean, detail: string }[] }} input
+ *   `attestation` is attestationState's text.
  */
-export function renderSummary({ tag, releaseUrl, assetCount, platformCount, checks }) {
+export function renderSummary({ tag, releaseUrl, assetCount, platformCount, attestation, checks }) {
   const cell = (s) => String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ')
   const failed = checks.filter((c) => !c.ok).length
   return [
@@ -519,6 +533,7 @@ export function renderSummary({ tag, releaseUrl, assetCount, platformCount, chec
     `| Release (draft) | ${releaseUrl} |`,
     `| Assets | ${assetCount} |`,
     `| Updater platforms | ${platformCount} |`,
+    `| Attestation | ${attestation} |`,
     `| Result | ${failed ? `**${failed} check(s) failed**` : 'all checks passed'} |`,
     '',
     '| Check | Result | Detail |',
@@ -532,7 +547,8 @@ export function renderSummary({ tag, releaseUrl, assetCount, platformCount, chec
  * Entry point for actions/github-script. Reads its inputs from the environment:
  * RELEASE_ID, REL_OWNER, REL_NAME, TAG, CHANNEL, TARGETS, MACOS_BUNDLES, WINDOWS_BUNDLES,
  * LINUX_BUNDLES, SRC_TAURI (the app's src-tauri checkout), SUMS_SIGNED ('true' when the
- * checksums job signed SHA256SUMS), COSIGN_SIGNED ('true' when the cosign job ran).
+ * checksums job signed SHA256SUMS), COSIGN_SIGNED ('true' when the cosign job ran),
+ * ATTESTATION (the attest step's outcome, for the summary only).
  */
 export async function run({ github, core, env, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const owner = env.REL_OWNER
@@ -606,6 +622,7 @@ export async function run({ github, core, env, sleep = (ms) => new Promise((reso
       releaseUrl: release.html_url,
       assetCount: release.assets.length,
       platformCount: manifest?.platforms ? Object.keys(manifest.platforms).length : 'unreadable',
+      attestation: attestationState(env.ATTESTATION),
       checks,
     }))
     .write()
