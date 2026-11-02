@@ -180,7 +180,8 @@ re-read this first.
 
 - **Pre-release versions must be baked into the version files too** (not just
   the tag) or the installed binary reports a different version than the
-  manifest and the updater comparison misbehaves. Use `version-manager.ts set`.
+  manifest and the updater comparison misbehaves. release-kit writes them
+  (README, step 6).
 
 - **A failed release attempt is RESUMED, not recycled** (since 2026-08-18):
   the pipeline reuses an existing draft for the tag, so fix on main and

@@ -297,7 +297,7 @@ on:
           version (stable releases only). Off by default: release-kit, the
           recommended driver, writes the version BEFORE tagging, and a second
           writer after the release races it on the same version files. Turn
-          it on only when versions are set by hand (version-manager.ts) and
+          it on only when versions are set by hand and
           you want main moved past the released version automatically.
           Opening the PR needs the app repo's "Allow GitHub Actions to create
           and approve pull requests" setting; without it the branch is pushed

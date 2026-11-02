@@ -80,10 +80,9 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
      "Credential preflight")
    - `templates/rust-toolchain.toml` → repo root (adjust the channel; KEEP the
      `components` line)
-   - version bumping: either `scripts/version-manager.ts` → `tooling/scripts/`
-     (adjust the paths + Cargo.lock key; run via `tsx`), or
+   - version bumping:
      [`@entro314labs/release-kit`](https://www.npmjs.com/package/@entro314labs/release-kit)
-     with the config in step 6 — it writes the same files, rolls the
+     with the config in step 6 — it writes the version files, rolls the
      CHANGELOG, tags and pushes in one command
    - the preflight wrapper from [`preflight/README.md`](preflight/README.md)
      → `tooling/preflight/preflight.sh` + a `"preflight"` package.json script
@@ -158,18 +157,10 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    `linux_bundles` inputs. See [docs/PACKAGING.md](docs/PACKAGING.md) for what
    each format is for and its configuration surface.
 
-6. **Release ritual**:
+6. **Release ritual** — release-kit writes the version files and the CHANGELOG
+   heading this pipeline requires, tags and pushes:
    ```bash
-   tsx tooling/scripts/version-manager.ts set 0.2.0-alpha.1   # or patch/minor/major
-   # add the CHANGELOG heading, commit, push
-   git tag -a v0.2.0-alpha.1 -m "MyApp v0.2.0-alpha.1" && git push origin v0.2.0-alpha.1
-   ```
-
-   Or the same thing with release-kit, which also writes the CHANGELOG heading this
-   pipeline requires:
-
-   ```bash
-   release-kit 0.2.0-alpha.1
+   release-kit 0.2.0-alpha.1   # or patch/minor/major
    ```
 
    with `release.config.json` at the repo root:
@@ -194,14 +185,15 @@ a keep-a-changelog-style `CHANGELOG.md`. Details below.
    The glob covers `tauri.conf.json` and every per-OS overlay beside it; an overlay that
    carries no `version` of its own is skipped. Do not list the overlays by name — a file
    named on purpose that has no version to write fails release-kit's preflight.
-   What it adds over the script: `## [Unreleased]` is rolled into the version heading the
-   changelog guard checks for, the annotated tag carries the release notes, and a
-   half-finished run is resumed by re-running it. What it does not do is anything after the
-   tag — that is all still this kit.
+   `## [Unreleased]` is rolled into the version heading the changelog guard checks for,
+   the annotated tag carries the release notes, and a half-finished run is resumed by
+   re-running it. What it does not do is anything after the tag — that is all still this
+   kit.
 
    Channel is derived from the tag: `-alpha*` → alpha, `-beta*` → beta,
    otherwise stable. Pre-release versions MUST also be set in the version
-   files (the `set` command) so the binary's version matches the manifest.
+   files (release-kit writes them) so the binary's version matches the
+   manifest.
 
 7. **If a leg fails** — resume, don't recycle. The pipeline reuses an
    existing draft release for the tag, so retry via dispatch with only the

@@ -78,7 +78,7 @@ jobs:
       # appimage_repack: node tooling/scripts/appimage-repack.ts
       # --- Post-release patch-bump PR (default false). Leave it off with
       #     release-kit, which writes the version BEFORE the tag; turn it on
-      #     only when versions are set by hand with version-manager.ts.
+      #     only when versions are set by hand.
       # post_release_bump: true
       # --- Shipped platform set (optional). Default = all six legs; list
       #     fewer to skip legs you don't ship — each dropped macOS leg saves
