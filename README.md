@@ -26,13 +26,14 @@ encodes a CI failure that actually happened; read
 | `.github/workflows/commit-lint.yml` | Checks pull request titles are Conventional Commits, so the changelog stays complete |
 | `.github/workflows/flatpak.yml` | Repacks the released `.deb` into a Flatpak bundle + Flathub manifest |
 | `.github/workflows/aur.yml` | Renders, validates and publishes a `-bin` PKGBUILD to the AUR |
+| `.github/workflows/arch-repo.yml` | Repacks the released `.deb` into signed Arch packages in a self-hosted, Pages-served pacman repository |
 | `.github/workflows/app-store.yml` | Builds and uploads a Mac App Store `.pkg` / iOS `.ipa` |
 | `.github/workflows/credentials.yml` | Credential preflight: proves the signing/publishing secrets still work, without building |
 | `.github/workflows/linux-repos.yml` | Signed APT and DNF/YUM repositories on GitHub Pages from the released `.deb` / `.rpm` |
 
 All of them are `workflow_call` reusable workflows — fixes land here once and
 every app picks them up. Pin `@main` for latest or a tag for stability. The
-last three chain off `release.yml` with `needs:` in one caller file; see
+distribution channels chain off `release.yml` with `needs:` in one caller file; see
 [`templates/release.yml`](templates/release.yml).
 
 ### Distribution channels
@@ -46,6 +47,7 @@ last three chain off `release.yml` with `needs:` in one caller file; see
 | Scoop bucket (stable only) | the released NSIS installer | `release.yml` (`scoop_bucket`) |
 | Flathub / Flatpak bundle | the released `.deb` | `flatpak.yml` |
 | Arch User Repository | the released `.deb` | `aur.yml` |
+| Self-hosted pacman repository (GitHub Pages) | the released `.deb` | `arch-repo.yml` |
 | APT / DNF repositories (GitHub Pages) | the released `.deb` / `.rpm` | `linux-repos.yml` |
 | Mac App Store / iOS App Store | source (separate, sandboxed build) | `app-store.yml` |
 
@@ -740,6 +742,12 @@ had that the other did not. What is shared:
 - the concurrency key on `inputs.tag || github.ref_name` in `templates/release.yml`
 - the verify-release asset contract and its summary table
 - the attestation, SBOM and `SHA256SUMS` jobs (same names and format)
+- `arch-repo.yml` — the staging half: clone or init of the hosting repo,
+  pruning superseded versions, `repo-add` in an Arch container, database
+  signing, the 950 MiB Pages guard, and the re-stage-on-rejected-push retry.
+  The tauri kit builds its packages from the `.deb` first (the linux kit's
+  are release assets), so it also refuses to overwrite a package file that is
+  already in the repository: its rebuilt bytes would differ from the cached ones.
 
 ## Contributing
 

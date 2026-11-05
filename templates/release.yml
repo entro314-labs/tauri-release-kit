@@ -199,6 +199,28 @@ jobs:
       # dry_run: true                  # ← validate without publishing
     secrets: inherit
 
+  # --- OPTIONAL: self-hosted pacman repository on GitHub Pages — the Arch
+  #     channel that needs no AUR account. See docs/LINUX_STORES.md.
+  arch-repo:
+    needs: release
+    # Runs once the release is public, even when a later job in it (winget,
+    # the cask, bump-version) failed the call.
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
+    uses: entro314-labs/tauri-release-kit/.github/workflows/arch-repo.yml@main
+    with:
+      tag: ${{ inputs.tag || '' }}
+      releases_repo: 'my-org/myapp-releases'
+      pkgname: 'myapp'                 # ← no -bin: that is an AUR rule
+      pkgdesc: 'One-line app description'
+      url: 'https://example.com'
+      license: 'MIT'
+      maintainer: 'Your Name <you@example.com>'
+      conflicts: 'myapp-bin'           # ← the AUR package, if you publish one
+      repo_name: 'myorg'               # ← the [section] users add to pacman.conf
+      pages_repo: 'my-org/arch-repo'   # ← public, Pages-enabled, shared by your apps
+      # dry_run: true                  # ← build and validate without publishing
+    secrets: inherit
+
   # --- OPTIONAL: Mac App Store / iOS. A DIFFERENT artifact from the release
   #     above (sandboxed, no updater), so it builds from source rather than
   #     reusing the release assets. Needs src-tauri/tauri.appstore.conf.json

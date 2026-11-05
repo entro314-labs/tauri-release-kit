@@ -1,7 +1,7 @@
-# Flatpak and the AUR
+# Flatpak, the AUR and a pacman repository
 
-Two reusable workflows publish the Linux release onward. Both run **after**
-`release.yml` has published, both build from the `.deb` it produced, and both
+Three reusable workflows publish the Linux release onward. All run **after**
+`release.yml` has published, all build from the `.deb` it produced, and all
 degrade to "render and validate, don't publish" when their credentials are
 absent.
 
@@ -198,6 +198,10 @@ users on the prerelease.
 
 ### The generated PKGBUILD
 
+`scripts/render-pkgbuild.sh` writes it, and `arch-repo.yml` uses the same
+renderer, so the AUR package and the pacman-repository package stay identical
+apart from their name and where their sources come from.
+
 ```ini
 options=('!strip' '!debug')
 ```
@@ -236,3 +240,78 @@ its `gh-pages` branch and a `LINUX_REPO_TOKEN` that can push to it, and skips
 with a warning until both exist (see the workflow's header).
 
 **Homebrew** is covered — see the cask job in `release.yml` and the README.
+
+## Pacman repository
+
+The AUR channel needs an AUR account; `arch-repo.yml` does not. It builds the
+Arch package itself, signs it, and publishes it into a pacman repository
+served from GitHub Pages. Users install and upgrade with plain `pacman`, no
+AUR helper.
+
+```yaml
+  arch-repo:
+    needs: release
+    if: ${{ !cancelled() && needs.release.outputs.published == 'true' }}
+    uses: entro314-labs/tauri-release-kit/.github/workflows/arch-repo.yml@main
+    with:
+      tag: ${{ inputs.tag || '' }}
+      releases_repo: 'my-org/myapp-releases'
+      pkgname: 'myapp'                 # no -bin: that is an AUR rule
+      pkgdesc: 'One-line app description'
+      url: 'https://example.com'
+      license: 'MIT'
+      maintainer: 'Your Name <you@example.com>'
+      conflicts: 'myapp-bin'           # the AUR package, if you also publish one
+      repo_name: 'myorg'               # the [section] in pacman.conf
+      pages_repo: 'my-org/arch-repo'
+    secrets:
+      ARCH_REPO_TOKEN: ${{ secrets.ARCH_REPO_TOKEN }}
+      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+      LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+      LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+      LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+```
+
+### One-time setup
+
+1. Create a **public** repository to host the pacman repository, shared by
+   every app that publishes into it, and enable GitHub Pages on its `main`
+   branch. Give it a custom domain: the URL goes into every user's
+   `/etc/pacman.conf`, and a `github.io` address breaks if the org is renamed.
+2. Add a token with Contents: read and write on that repository to each app
+   repository as `ARCH_REPO_TOKEN`.
+3. Add the `LINUX_GPG_*` secrets. The workflow signs every package and the
+   database, and publishes the public key as `<repo_name>.asc` at the root.
+
+Users then run, once:
+
+```sh
+curl -sLo /tmp/myorg.asc https://repo.example.com/myorg.asc
+sudo pacman-key --add /tmp/myorg.asc
+sudo pacman-key --lsign-key <fingerprint>
+printf '\n[myorg]\nSigLevel = Required DatabaseOptional\nServer = https://repo.example.com/$arch\n' \
+  | sudo tee -a /etc/pacman.conf
+sudo pacman -Sy myapp
+```
+
+### What it does
+
+- Downloads the release's `.deb` files and checks each against the release's
+  `SHA256SUMS` before building anything.
+- Runs `makepkg` once per architecture in a pinned `archlinux:base-devel`
+  container. aarch64 is packaged on the x86_64 runner: nothing is compiled or
+  stripped, so only `CARCH` changes. Because the build happens here, the
+  releases repository may stay private, which the AUR cannot allow.
+- Signs the packages and the database, and validates the staged repository by
+  installing the package with a real `pacman` that trusts only the published
+  key, so a broken signature fails here instead of on users' machines.
+- Prunes superseded versions beyond `keep` (default 1) and pushes. A rejected
+  push (another app published concurrently) re-stages from the new remote
+  state and retries.
+
+Stable releases only: a prerelease tag skips the channel with a notice.
+
+A package file that is already in the repository is never replaced. Each run
+rebuilds the package, so the new bytes would differ from what users' pacman
+has cached, and pacman rejects that. To republish a version after a packaging
+change, bump the `pkgrel` input.
