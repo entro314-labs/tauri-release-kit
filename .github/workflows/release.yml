@@ -1653,6 +1653,54 @@ jobs:
       # than failing) when signing secrets are absent, so a silently
       # un-notarized release is otherwise possible. When signing IS configured,
       # fail unless the output is signed + notarized + stapled.
+      # tauri-bundler notarizes and staples the .app, but not the DMG it then wraps it in, so a
+      # downloaded DMG carried no ticket of its own and the verify step below failed on it. The
+      # DMG goes to Apple with the same credentials, is stapled, and replaces the unstapled copy
+      # tauri-action already put on the draft (the updater uses the .app.tar.gz, so its signature
+      # is unaffected; checksums and the cask hash are computed later, from this copy).
+      - name: Notarize and staple the DMG
+        if: matrix.os_name == 'darwin' && contains(format(',{0},', matrix.bundles), ',dmg,')
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || inputs.releases_repo != '' && secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          RELEASES_OWNER: ${{ needs.check-changelog.outputs.releases_owner }}
+          RELEASES_NAME: ${{ needs.check-changelog.outputs.releases_name }}
+          BUNDLE_DIR: ${{ inputs.rust_workspace_dir || format('{0}/src-tauri', inputs.project_path) }}/target/${{ matrix.target }}/release/bundle
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_API_KEY_PATH:-}" ] && [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
+            AUTH=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
+          elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          else
+            echo "::notice::No notarization credentials - the DMG is left as built."
+            exit 0
+          fi
+          DMG="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
+          if [ -z "$DMG" ]; then
+            echo "::error::dmg is in this leg's bundle list but no .dmg was produced under $BUNDLE_DIR/dmg"
+            exit 1
+          fi
+          xcrun notarytool submit "$DMG" "${AUTH[@]}" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          STATUS="$(jq -r .status "$RUNNER_TEMP/dmg-notary.json")"
+          if [ "$STATUS" != "Accepted" ]; then
+            ID="$(jq -r .id "$RUNNER_TEMP/dmg-notary.json")"
+            echo "::error::Apple did not accept $(basename "$DMG"): $STATUS"
+            xcrun notarytool log "$ID" "${AUTH[@]}" || true
+            exit 1
+          fi
+          xcrun stapler staple "$DMG"
+          NAME="$(basename "$DMG")"
+          REPO="$RELEASES_OWNER/$RELEASES_NAME"
+          ASSET_ID="$(gh api "repos/$REPO/releases/$RELEASE_ID/assets" --paginate --jq ".[] | select(.name == \"$NAME\") | .id")"
+          if [ -n "$ASSET_ID" ]; then
+            gh api --method DELETE "repos/$REPO/releases/assets/$ASSET_ID"
+          fi
+          gh api --method POST -H "Content-Type: application/x-apple-diskimage" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$NAME" \
+            --input "$DMG" --jq .name
+          echo "Notarized, stapled and re-uploaded $NAME."
+
       - name: Verify macOS signing + notarization
         if: matrix.os_name == 'darwin'
         env:
