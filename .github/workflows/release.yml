@@ -1695,13 +1695,15 @@ jobs:
           xcrun stapler staple "$DMG"
           NAME="$(basename "$DMG")"
           REPO="$RELEASES_OWNER/$RELEASES_NAME"
-          ASSET_ID="$(gh api "repos/$REPO/releases/$RELEASE_ID/assets" --paginate --jq ".[] | select(.name == \"$NAME\") | .id")"
+          # curl, not gh: a self-hosted mac's launchd PATH may not reach Homebrew's gh.
+          API=(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          ASSET_ID="$("${API[@]}" "https://api.github.com/repos/$REPO/releases/$RELEASE_ID/assets?per_page=100" \
+            | jq -r --arg name "$NAME" '.[] | select(.name == $name) | .id')"
           if [ -n "$ASSET_ID" ]; then
-            gh api --method DELETE "repos/$REPO/releases/assets/$ASSET_ID"
+            "${API[@]}" -X DELETE "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID"
           fi
-          gh api --method POST -H "Content-Type: application/x-apple-diskimage" \
-            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$NAME" \
-            --input "$DMG" --jq .name
+          "${API[@]}" -X POST -H "Content-Type: application/x-apple-diskimage" --data-binary "@$DMG" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$NAME" | jq -r .name
           echo "Notarized, stapled and re-uploaded $NAME."
 
       - name: Verify macOS signing + notarization
