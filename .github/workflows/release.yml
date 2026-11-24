@@ -1048,8 +1048,9 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
-    # Linux legs only (linux_container); an empty image means no container.
-    container: ${{ matrix.os_name == 'linux' && inputs.linux_container || '' }}
+    # Linux legs only (linux_container); an empty image means no container. The image is the
+    # caller's input: pinning it by digest (ubuntu:24.04@sha256:...) is the caller's choice.
+    container: ${{ matrix.os_name == 'linux' && inputs.linux_container || '' }} # zizmor: ignore[unpinned-images]
     timeout-minutes: 180
     environment: ${{ inputs.environment }}
     # tauri-action uploads assets to the draft in same-repo mode.
