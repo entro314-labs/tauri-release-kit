@@ -119,6 +119,19 @@ on:
         required: false
         type: string
         default: 'ubuntu-24.04-arm'
+      linux_container:
+        description: >-
+          Container image for the Linux legs, e.g. 'ubuntu:24.04'. Lets a
+          linux_*_runner point at a self-hosted machine whose own glibc is
+          newer than the floor (an Arch box, say): the leg builds inside the
+          image, so the binaries need the image's glibc, not the host's, and
+          the leg's apt and sudo steps change the container, never the
+          machine. Needs Docker on the runner; rpm_install_image (which runs
+          Docker itself) cannot be combined with it. Empty = build on the
+          runner directly.
+        required: false
+        type: string
+        default: ''
       cosign_sign:
         description: >-
           Sign SHA256SUMS and every AppImage with keyless Sigstore (cosign)
@@ -765,12 +778,18 @@ jobs:
       MACOS_INTEL_RUNNER: ${{ inputs.macos_intel_runner }}
       LINUX_X64_RUNNER: ${{ inputs.linux_x64_runner }}
       LINUX_ARM_RUNNER: ${{ inputs.linux_arm_runner }}
+      LINUX_CONTAINER: ${{ inputs.linux_container }}
+      RPM_INSTALL_IMAGE: ${{ inputs.rpm_install_image }}
       VERSION: ${{ needs.check-changelog.outputs.version }}
     steps:
       - name: Compute build matrix
         id: plan
         run: |
           set -euo pipefail
+          if [ -n "$LINUX_CONTAINER" ] && [ -n "$RPM_INSTALL_IMAGE" ]; then
+            echo "::error::rpm_install_image runs Docker on the build runner, which the linux_container legs cannot reach; set one or the other"
+            exit 1
+          fi
           # One leg definition per updater-manifest platform key.
           #   - macOS: native runner per arch — cross-compiling trips
           #     rustls/ring on apple-sys crates.
@@ -1029,6 +1048,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.platform }}
+    # Linux legs only (linux_container); an empty image means no container.
+    container: ${{ matrix.os_name == 'linux' && inputs.linux_container || '' }}
     timeout-minutes: 180
     environment: ${{ inputs.environment }}
     # tauri-action uploads assets to the draft in same-repo mode.
@@ -1036,6 +1057,24 @@ jobs:
       contents: write
 
     steps:
+      # A bare distribution image lacks what the hosted Ubuntu images preinstall and the steps
+      # below expect: sudo (the steps run as root here, so it is a plain pass-through), git for
+      # the checkout, and the build, packaging and signing tools.
+      - name: Prepare the Linux build container
+        if: matrix.os_name == 'linux' && inputs.linux_container != ''
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            sudo git ca-certificates curl wget gnupg build-essential pkg-config file \
+            xz-utils zstd unzip jq python3 squashfs-tools desktop-file-utils dbus
+          echo "DEBIAN_FRONTEND=noninteractive" >> "$GITHUB_ENV"
+          # linuxdeploy and the built AppImage are AppImages themselves; a container has no FUSE.
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
+          # The workspace is owned by the runner's user, not root.
+          git config --global --add safe.directory '*'
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1113,7 +1152,7 @@ jobs:
       # GitHub-hosted images only (self-hosted runners have no such bloat and
       # the paths simply won't exist).
       - name: Free runner disk space
-        if: matrix.os_name == 'linux'
+        if: matrix.os_name == 'linux' && runner.environment == 'github-hosted' && inputs.linux_container == ''
         run: |
           BEFORE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \

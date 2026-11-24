@@ -248,6 +248,12 @@ WebKitGTK 4.1). Every Linux leg reports the glibc its binaries need in the run
 summary; set `glibc_max` (e.g. `'2.35'`) to make a leg that needs more fail
 before the release is published.
 
+A self-hosted Linux runner follows the same rule: its own glibc is the floor. To build on a
+machine with a newer one (an Arch or Fedora workstation), set `linux_container` to the image
+whose glibc you want, e.g. `ubuntu:24.04` with `linux_x64_runner` naming the machine's label.
+The leg then builds inside that image on the machine's Docker, and its `apt-get`/`sudo` steps
+touch the container only. Keep `glibc_max` set so a leg that escaped the container fails.
+
 Related: GUI apps on Linux and macOS do not inherit `$PATH` from your shell
 dotfiles. If your app shells out to anything, use Tauri's
 [`fix-path-env-rs`](https://github.com/tauri-apps/fix-path-env-rs).
