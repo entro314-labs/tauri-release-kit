@@ -1070,6 +1070,13 @@ jobs:
           apt-get install -y --no-install-recommends \
             sudo git ca-certificates curl wget gnupg build-essential pkg-config file \
             xz-utils zstd unzip jq python3 squashfs-tools desktop-file-utils dbus libssl-dev
+          # The GitHub CLI, which the hosted images ship and the AppImage repack step uses.
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
           # Inside a container the runner starts run steps with sh, which is dash here; the steps
           # below are bash (pipefail, arrays), as the hosted images' default shell is.
           ln -sf bash /bin/sh
