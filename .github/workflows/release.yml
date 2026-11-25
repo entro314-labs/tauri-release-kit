@@ -1191,6 +1191,14 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo clippy --target "$env:TARGET" -- -D warnings
 
+      # A self-hosted mac with a short idle-sleep setting slept in the middle of a release build,
+      # which dropped the runner's connection and locked the signing keychain. Hold an idle- and
+      # system-sleep assertion for this job; the runner ends the process with the job's other
+      # orphans.
+      - name: Keep the mac awake for this job
+        if: runner.os == 'macOS'
+        run: nohup caffeinate -i -s -t 14400 > /dev/null 2>&1 &
+
       # Materialize the App Store Connect API key (.p8) for notarization.
       # Stored base64 so it survives the GitHub secrets UI. No-op when unset.
       - name: Materialize Apple API key
@@ -1251,7 +1259,9 @@ jobs:
             KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
             security list-keychains -d user | tr -d '"' | sed 's/^ *//' > "$RUNNER_TEMP/original-keychains.txt"
             security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            # No -l (lock on sleep): a self-hosted mac that sleeps mid-build would wake to a
+            # locked keychain and fail codesign with errSecInternalComponent.
+            security set-keychain-settings -ut 21600 "$KEYCHAIN"
             security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
             printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
             security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
