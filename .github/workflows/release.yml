@@ -2059,6 +2059,16 @@ jobs:
       # The certificate keychain made in "Export Apple signing env": a self-hosted mac keeps its
       # user keychain list between jobs, so it is restored and the keychain deleted, whatever the
       # job's outcome.
+      # A linux_container leg runs as root, and the runner's work directory (checkout, node_modules,
+      # tool cache, temp) is mounted from the host: whatever it wrote stays root-owned there, and the
+      # runner's next ordinary job cannot clean its checkout. Hand everything back to the user the
+      # runner runs as, which owns the directory the runner created for this repository.
+      - name: Return the work directory to the runner's user
+        if: always() && matrix.os_name == 'linux' && inputs.linux_container != ''
+        # A cleanup: it reports a failure but does not fail a leg that built and uploaded.
+        continue-on-error: true
+        run: chown -R "$(stat -c '%u:%g' "$RUNNER_WORKSPACE")" "$RUNNER_WORKSPACE/.."
+
       - name: Remove the job's signing keychain
         if: always() && matrix.os_name == 'darwin'
         run: |
