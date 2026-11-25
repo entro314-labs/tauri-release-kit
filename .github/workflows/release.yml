@@ -1584,6 +1584,10 @@ jobs:
           # FUSE installed). Harmless elsewhere; the shipped binary is already
           # stripped by cargo's release profile.
           NO_STRIP: 'true'
+          # tauri-bundler skips the Finder AppleScript that lays out the DMG window only when
+          # CI is "true" in its own environment. Without it, a self-hosted mac's runner, which
+          # has no Automation grant for Finder, hung in osascript until the job timed out.
+          CI: 'true'
         with:
           projectPath: ${{ inputs.project_path }}
           tauriScript: pnpm tauri
@@ -1631,6 +1635,10 @@ jobs:
           # FUSE installed). Harmless elsewhere; the shipped binary is already
           # stripped by cargo's release profile.
           NO_STRIP: 'true'
+          # tauri-bundler skips the Finder AppleScript that lays out the DMG window only when
+          # CI is "true" in its own environment. Without it, a self-hosted mac's runner, which
+          # has no Automation grant for Finder, hung in osascript until the job timed out.
+          CI: 'true'
         with:
           projectPath: ${{ inputs.project_path }}
           tauriScript: pnpm tauri
