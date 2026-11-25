@@ -1070,6 +1070,9 @@ jobs:
           apt-get install -y --no-install-recommends \
             sudo git ca-certificates curl wget gnupg build-essential pkg-config file \
             xz-utils zstd unzip jq python3 squashfs-tools desktop-file-utils dbus libssl-dev
+          # Inside a container the runner starts run steps with sh, which is dash here; the steps
+          # below are bash (pipefail, arrays), as the hosted images' default shell is.
+          ln -sf bash /bin/sh
           echo "DEBIAN_FRONTEND=noninteractive" >> "$GITHUB_ENV"
           # linuxdeploy and the built AppImage are AppImages themselves; a container has no FUSE.
           echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
