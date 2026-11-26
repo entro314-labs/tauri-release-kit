@@ -667,7 +667,7 @@ jobs:
       # repo with Contents: write — before any leg runs.
       - name: Preflight - GitHub App can write the releases repo
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -966,7 +966,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -1108,7 +1108,7 @@ jobs:
       # After Node: pnpm/action-setup bootstraps pnpm through npm, which a linux_container image
       # (unlike the hosted images) does not ship until setup-node provides it.
       - name: Install pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
 
       # The pinned toolchain from rust-toolchain.toml is what cargo actually
       # uses; the toml MUST declare components = ["rustfmt", "clippy"], because
@@ -1563,7 +1563,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2115,7 +2115,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2374,7 +2374,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2475,7 +2475,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2534,7 +2534,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2551,7 +2551,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.3
 
@@ -2645,7 +2645,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2709,7 +2709,7 @@ jobs:
       - name: Mint releases-repo token (GitHub App)
         id: app_token
         if: inputs.app_client_id != '' && inputs.releases_repo != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -2956,7 +2956,7 @@ jobs:
       - name: Mint tap token (GitHub App)
         id: app_token
         if: inputs.app_client_id != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -3283,7 +3283,7 @@ jobs:
       - name: Mint bucket token (GitHub App)
         id: app_token
         if: inputs.app_client_id != ''
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ inputs.app_client_id }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
