@@ -454,8 +454,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Validating ${PKG}..."
-          if ! xcrun altool --validate-app "$PKG" \
-              --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER" 2>&1 | tee "${RUNNER_TEMP}/validate.log"; then
+          if ! xcrun altool --validate-app --type macos --file "$PKG" \
+              --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER" 2>&1 | tee "${RUNNER_TEMP}/validate.log"; then
             echo "::error::App Store validation failed — see the log above. Nothing was uploaded."
             exit 1
           fi
@@ -463,8 +463,8 @@ jobs:
             echo "::notice::validate_only is set — package validated, upload skipped."
             exit 0
           fi
-          xcrun altool --upload-package "$PKG" \
-            --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"
+          xcrun altool --upload-app --type macos --file "$PKG" \
+            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
           echo "::notice::Uploaded to App Store Connect. Processing takes a few minutes before the build appears in TestFlight."
 
       # Keep the package even when the upload fails — re-running the whole
@@ -637,8 +637,8 @@ jobs:
             exit 1
           fi
           echo "ipa=${IPA}" >> "$GITHUB_OUTPUT"
-          if ! xcrun altool --validate-app "$IPA" \
-              --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"; then
+          if ! xcrun altool --validate-app --type ios --file "$IPA" \
+              --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"; then
             echo "::error::App Store validation failed — nothing was uploaded."
             exit 1
           fi
@@ -646,8 +646,8 @@ jobs:
             echo "::notice::validate_only is set — IPA validated, upload skipped."
             exit 0
           fi
-          xcrun altool --upload-package "$IPA" \
-            --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
           echo "::notice::Uploaded to App Store Connect."
 
       - name: Upload .ipa as a workflow artifact
