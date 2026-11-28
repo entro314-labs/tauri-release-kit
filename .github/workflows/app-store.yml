@@ -272,13 +272,17 @@ jobs:
           KEYCHAIN="${RUNNER_TEMP}/app-store.keychain-db"
 
           security create-keychain -p "$KC_PASS" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          # No -l (lock on sleep): a self-hosted mac that sleeps mid-build wakes to a locked
+          # keychain and codesign fails with errSecInternalComponent.
+          security set-keychain-settings -ut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
           # Keep the login keychain in the search list; the runner's Apple
           # intermediate certificates live there and codesign needs them to
           # build a chain.
           # shellcheck disable=SC2046 # word splitting is the point: one arg per keychain
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Remember the runner's default keychain: cleanup restores exactly that one.
+          security default-keychain -d user | tr -d '" ' > "${RUNNER_TEMP}/app-store.default-keychain"
           security default-keychain -s "$KEYCHAIN"
 
           import_p12() {
@@ -450,8 +454,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "Validating ${PKG}..."
-          if ! xcrun altool --validate-app --type macos --file "$PKG" \
-              --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER" 2>&1 | tee "${RUNNER_TEMP}/validate.log"; then
+          if ! xcrun altool --validate-app "$PKG" \
+              --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER" 2>&1 | tee "${RUNNER_TEMP}/validate.log"; then
             echo "::error::App Store validation failed — see the log above. Nothing was uploaded."
             exit 1
           fi
@@ -459,8 +463,8 @@ jobs:
             echo "::notice::validate_only is set — package validated, upload skipped."
             exit 0
           fi
-          xcrun altool --upload-app --type macos --file "$PKG" \
-            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
+          xcrun altool --upload-package "$PKG" \
+            --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"
           echo "::notice::Uploaded to App Store Connect. Processing takes a few minutes before the build appears in TestFlight."
 
       # Keep the package even when the upload fails — re-running the whole
@@ -479,7 +483,8 @@ jobs:
       - name: Remove build keychain
         if: always() && steps.keychain.outcome == 'success'
         run: |
-          security default-keychain -s login.keychain-db 2>/dev/null || true
+          prev="$(cat "${RUNNER_TEMP}/app-store.default-keychain" 2>/dev/null || true)"
+          security default-keychain -s "${prev:-login.keychain-db}" 2>/dev/null || true
           security delete-keychain "${RUNNER_TEMP}/app-store.keychain-db" 2>/dev/null || true
 
   ios:
@@ -632,8 +637,8 @@ jobs:
             exit 1
           fi
           echo "ipa=${IPA}" >> "$GITHUB_OUTPUT"
-          if ! xcrun altool --validate-app --type ios --file "$IPA" \
-              --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"; then
+          if ! xcrun altool --validate-app "$IPA" \
+              --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"; then
             echo "::error::App Store validation failed — nothing was uploaded."
             exit 1
           fi
@@ -641,8 +646,8 @@ jobs:
             echo "::notice::validate_only is set — IPA validated, upload skipped."
             exit 0
           fi
-          xcrun altool --upload-app --type ios --file "$IPA" \
-            --apiKey "$APPLE_API_KEY_ID" --apiIssuer "$APPLE_API_ISSUER"
+          xcrun altool --upload-package "$IPA" \
+            --api-key "$APPLE_API_KEY_ID" --api-issuer "$APPLE_API_ISSUER"
           echo "::notice::Uploaded to App Store Connect."
 
       - name: Upload .ipa as a workflow artifact
