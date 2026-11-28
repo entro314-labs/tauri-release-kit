@@ -6,7 +6,7 @@
 # rustup lives in a named volume and resolves the repo's pinned
 # rust-toolchain.toml at run time, so this image never goes stale on a
 # toolchain bump. Node/pnpm are included only for `--full` bundle runs.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
