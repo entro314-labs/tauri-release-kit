@@ -390,3 +390,13 @@ the first person to hit one recognises it. Each says how firm it is.
   under `CI` an unset `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` and an empty one
   are the same `Some("")` to the CLI. README step 3 pins the generating CLI;
   `credentials.yml` names this cause when it sees the error.
+
+- **Homebrew `rsync` breaks `xcodebuild -exportArchive` on a Mac that has it
+  first on PATH.** The export's `IDEDistributionCreateIPAStep` copies dSYM
+  symbols with `rsync` options that macOS's `/usr/bin/rsync` (openrsync)
+  accepts and GNU rsync rejects: the export fails with
+  `rsync: --extended-attributes: unknown option`. Hit on a Capacitor iOS export
+  on a developer Mac with `brew install rsync`; not yet hit by `tauri ios build`,
+  which runs the same export, so a self-hosted iOS leg on such a Mac is the
+  likely place. Fix: put `/usr/bin` first on PATH for the export step
+  (apple-release-kit's `build-app.sh` does this for every export).
