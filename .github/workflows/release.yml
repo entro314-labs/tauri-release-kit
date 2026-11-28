@@ -2093,11 +2093,15 @@ jobs:
         if: always() && matrix.os_name == 'darwin'
         run: |
           KEYCHAIN="$RUNNER_TEMP/release-signing.keychain-db"
-          if [ -f "$RUNNER_TEMP/original-keychains.txt" ]; then
-            # shellcheck disable=SC2046 # one keychain path per line, none with spaces
-            security list-keychains -d user -s $(cat "$RUNNER_TEMP/original-keychains.txt")
-          fi
           if [ -f "$KEYCHAIN" ]; then
+            # Drop only this job's keychain from the CURRENT search list. Restoring the list saved
+            # at setup would also drop a keychain a concurrent job on the same runner added since.
+            keep=()
+            while IFS= read -r kc; do
+              kc="${kc//\"/}"; kc="${kc#"${kc%%[![:space:]]*}"}"
+              if [ -n "$kc" ] && [ "${kc#/private}" != "${KEYCHAIN#/private}" ]; then keep+=("$kc"); fi
+            done < <(security list-keychains -d user)
+            if [ "${#keep[@]}" -gt 0 ]; then security list-keychains -d user -s "${keep[@]}"; fi
             security delete-keychain "$KEYCHAIN"
           fi
 
